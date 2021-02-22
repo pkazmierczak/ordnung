@@ -15,6 +15,6 @@ CTIMEVAR=-X github.com/pkazmierczak/photoordnung/version.GITCOMMIT=$(GITCOMMIT) 
 GO_LDFLAGS=-ldflags "-w $(CTIMEVAR)"
 
 release:
-	CGO_ENABLED=0 go build ${GO_LDFLAGS} cmd/photoordnung/main.go
+	CGO_ENABLED=0 go build ${GO_LDFLAGS} -o photoordnung cmd/photoordnung/main.go
 install:
 	cp photoordnung /usr/local/bin
