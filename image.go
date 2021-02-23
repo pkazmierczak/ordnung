@@ -57,7 +57,9 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int) error 
 
 	switch pattern {
 	case "YYYY-MM-DD":
-		newName = i.ExifDate.Format("2006-01-02")
+		newName = i.ExifDate.Format("2006.01.02")
+	case "YYYY/MM/DD":
+		newName = i.ExifDate.Format("2006/01/02")
 	default:
 		return fmt.Errorf("unrecognized renaming pattern: %v", pattern)
 	}
@@ -73,6 +75,22 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int) error 
 			"%s%s.jpg", path, newName,
 		)
 		(*newNames)[newName] = 0
+	}
+	return nil
+}
+
+func (i *Image) Rename() error {
+	if err := os.Rename(i.OriginalName, i.NewName); os.IsNotExist(err) {
+		dNew, _ := filepath.Split(i.NewName)
+		dOrig, _ := filepath.Split(i.OriginalName)
+		dOrigPerm, err := os.Stat(dOrig)
+		if err != nil {
+			return err
+		}
+		err = os.MkdirAll(dNew, dOrigPerm.Mode())
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
