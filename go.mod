@@ -1,4 +1,4 @@
-module github.com/pkazmierczak/photoordnung
+module github.com/pkazmierczak/ordnung
 
 go 1.15
 

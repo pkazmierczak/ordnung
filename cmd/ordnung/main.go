@@ -9,7 +9,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	image "github.com/pkazmierczak/photoordnung"
+	image "github.com/pkazmierczak/ordnung"
 )
 
 func getImages(directory string) ([]*image.Image, error) {
@@ -68,9 +68,11 @@ func main() {
 			log.Warnln(err)
 		}
 		if img.Process {
-			img.GenerateNewName(*pattern, &newNames)
+			if err := img.GenerateNewName(*pattern, &newNames); err != nil {
+				log.Fatal(err)
+			}
 			if !*dryRun {
-				if err := os.Rename(img.OriginalName, img.NewName); err != nil {
+				if err := img.Rename(); err != nil {
 					log.Errorln(err)
 				}
 			}
