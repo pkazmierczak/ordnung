@@ -43,6 +43,7 @@ func (i *Image) ExtractExifDate() error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	// determines the file type, currently we support JPG and HEIC
 	t, err := imagetype.Scan(f)
