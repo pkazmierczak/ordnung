@@ -10,7 +10,18 @@ import (
 
 	"github.com/evanoberholster/imagemeta"
 	"github.com/evanoberholster/imagemeta/imagetype"
+	"gopkg.in/djherbis/times.v1"
 )
+
+func dateFromFS(filename string) time.Time {
+	t, _ := times.Stat(filename)
+
+	if t.HasBirthTime() {
+		return t.BirthTime()
+	}
+
+	return t.ChangeTime()
+}
 
 // Image stores all the information about the image we're about to process (or
 // not)
@@ -44,15 +55,22 @@ func (i *Image) ExtractExifDate() error {
 		return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
 	}
 
+	exifError := func(err error) error {
+		return fmt.Errorf("error processing exif data for %v: %v, using file creation date instead",
+			i.OriginalName,
+			err,
+		)
+	}
+
 	x, err := imagemeta.ScanExif(f)
 	if err != nil {
-		i.Process = false
-		return fmt.Errorf("error processing %v: %v, skipping", i.OriginalName, err)
+		i.ExifDate = dateFromFS(i.OriginalName)
+		return exifError(err)
 	}
 	tm, err := x.DateTime()
 	if err != nil {
-		i.Process = false
-		return fmt.Errorf("error processing %v: %v, skipping", i.OriginalName, err)
+		i.ExifDate = dateFromFS(i.OriginalName)
+		return exifError(err)
 	}
 
 	i.ExifDate = tm

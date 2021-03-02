@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/cheggaaa/pb/v3"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/pkazmierczak/ordnung"
@@ -12,8 +13,11 @@ import (
 
 var (
 	dryRun  = flag.Bool("dry", true, "Dry run? (only prints a list of pairs: old name -> new name)")
-	pattern = flag.String("pattern", "YYYY-MM-DD", "Renaming pattern")
-	loglvl  = flag.String("log-level", "info", "The log level")
+	pattern = flag.String("pattern", "YYYY-MM-DD", `Renaming pattern, can be one of the following:
+- YYYY-MM-DD
+- YYYY/MM/DD
+- YYYY/MM-DD`)
+	loglvl = flag.String("log-level", "info", "The log level")
 )
 
 func main() {
@@ -50,6 +54,7 @@ Options:
 	// keep track of all the new names we're creating to avoid conflicts
 	newNames := map[string]int{}
 
+	bar := pb.StartNew(len(images))
 	for _, img := range images {
 		if err := img.ExtractExifDate(); err != nil {
 			log.Warnln(err)
@@ -61,7 +66,8 @@ Options:
 					log.Errorln(err)
 				}
 			}
+			bar.Increment()
 		}
-		fmt.Printf("%s ⇒ %s\n", img.OriginalName, img.NewName)
 	}
+	bar.Finish()
 }
