@@ -1,9 +1,10 @@
-package image
+package ordnung
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -105,4 +106,32 @@ func (i *Image) Rename() error {
 		}
 	}
 	return nil
+}
+
+// GetImages scans a directory (recursively) and returns an array of Image type
+// for the images found there. This function will only look for jpg and heic
+// files as these are the only file types we support for now.
+func GetImages(directory string) ([]*Image, error) {
+	images := make([]*Image, 0)
+
+	jpgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$")
+	if err != nil {
+		return images, err
+	}
+
+	if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
+		if err == nil && jpgRegexp.MatchString(info.Name()) {
+			img := New(path)
+			images = append(images, img)
+		}
+		return nil
+	}); err != nil {
+		return images, err
+	}
+
+	if len(images) == 0 {
+		return images, fmt.Errorf("no files found in %v", directory)
+	}
+
+	return images, nil
 }

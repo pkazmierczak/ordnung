@@ -4,44 +4,16 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"regexp"
 
 	log "github.com/sirupsen/logrus"
 
-	image "github.com/pkazmierczak/ordnung"
+	"github.com/pkazmierczak/ordnung"
 )
 
-func getImages(directory string) ([]*image.Image, error) {
-	images := make([]*image.Image, 0)
-
-	jpgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$") // we only support JPG and HEIC for now
-	if err != nil {
-		return images, err
-	}
-
-	if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
-		if err == nil && jpgRegexp.MatchString(info.Name()) {
-			img := image.New(path)
-			images = append(images, img)
-		}
-		return nil
-	}); err != nil {
-		return images, err
-	}
-
-	if len(images) == 0 {
-		return images, fmt.Errorf("no files found in %v", directory)
-	}
-
-	return images, nil
-}
-
 var (
-	dryRun    = flag.Bool("dry", true, "Dry run? (only prints a list of pairs: old name -> new name)")
-	directory = flag.String("dir", ".", "Directory where to look for images")
-	pattern   = flag.String("pattern", "YYYY-MM-DD", "Renaming pattern")
-	loglvl    = flag.String("log-level", "info", "The log level")
+	dryRun  = flag.Bool("dry", true, "Dry run? (only prints a list of pairs: old name -> new name)")
+	pattern = flag.String("pattern", "YYYY-MM-DD", "Renaming pattern")
+	loglvl  = flag.String("log-level", "info", "The log level")
 )
 
 func main() {
@@ -55,7 +27,22 @@ func main() {
 	}
 	log.SetLevel(logLevel)
 
-	images, err := getImages(*directory)
+	// custom "help" message
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: ./ordnung [options] directoryToScan
+
+Options:
+`)
+		flag.PrintDefaults()
+	}
+
+	arg := flag.Args()
+	if len(arg) != 1 {
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	images, err := ordnung.GetImages(arg[0])
 	if err != nil {
 		log.Fatalf("unable to scan files: %v", err)
 	}
