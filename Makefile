@@ -11,10 +11,10 @@ ifeq ($(GITCOMMIT),)
 endif
 
 # set LDFLAGS and inject version information
-CTIMEVAR=-X github.com/pkazmierczak/photoordnung/version.GITCOMMIT=$(GITCOMMIT) -X github.com/pkazmierczak/photoordnung/version.VERSION=$(VERSION)
+CTIMEVAR=-X github.com/pkazmierczak/ordnung/version.GITCOMMIT=$(GITCOMMIT) -X github.com/pkazmierczak/ordnung/version.VERSION=$(VERSION)
 GO_LDFLAGS=-ldflags "-w $(CTIMEVAR)"
 
 release:
-	CGO_ENABLED=0 go build ${GO_LDFLAGS} -o photoordnung cmd/photoordnung/main.go
+	CGO_ENABLED=0 go build ${GO_LDFLAGS} -o ordnung cmd/ordnung/main.go
 install:
-	cp photoordnung /usr/local/bin
+	cp ordnung /usr/local/bin

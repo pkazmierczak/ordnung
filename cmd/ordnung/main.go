@@ -15,7 +15,7 @@ import (
 func getImages(directory string) ([]*image.Image, error) {
 	images := make([]*image.Image, 0)
 
-	jpgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG)$") // we only support JPG for now
+	jpgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$") // we only support JPG and HEIC for now
 	if err != nil {
 		return images, err
 	}
@@ -38,9 +38,9 @@ func getImages(directory string) ([]*image.Image, error) {
 }
 
 var (
-	dryRun    = flag.Bool("dry", true, "Dry run? (only prints a list of pairs: old name -> new name; defaults to true)")
-	directory = flag.String("dir", ".", "Directory where to look for images (defaults to pwd)")
-	pattern   = flag.String("pattern", "YYYY-MM-DD", "Renaming pattern (defaults to YYYY-MM-DD)")
+	dryRun    = flag.Bool("dry", true, "Dry run? (only prints a list of pairs: old name -> new name)")
+	directory = flag.String("dir", ".", "Directory where to look for images")
+	pattern   = flag.String("pattern", "YYYY-MM-DD", "Renaming pattern")
 	loglvl    = flag.String("log-level", "info", "The log level")
 )
 
@@ -68,9 +68,7 @@ func main() {
 			log.Warnln(err)
 		}
 		if img.Process {
-			if err := img.GenerateNewName(*pattern, &newNames); err != nil {
-				log.Fatal(err)
-			}
+			img.GenerateNewName(*pattern, &newNames)
 			if !*dryRun {
 				if err := img.Rename(); err != nil {
 					log.Errorln(err)

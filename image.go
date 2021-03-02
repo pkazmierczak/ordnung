@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/rwcarlsen/goexif/exif"
+	"github.com/evanoberholster/imagemeta"
+	"github.com/evanoberholster/imagemeta/imagetype"
 )
 
 // Image stores all the information about the image we're about to process (or
@@ -30,19 +32,26 @@ func (i *Image) ExtractExifDate() error {
 		return err
 	}
 
-	x, err := exif.Decode(f)
+	// determines the file type, currently we support JPG and HEIC
+	t, err := imagetype.Scan(f)
+	if err != nil {
+		return err
+	}
+
+	if t.IsUnknown() {
+		i.Process = false
+		return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
+	}
+
+	x, err := imagemeta.ScanExif(f)
 	if err != nil {
 		i.Process = false
-		return fmt.Errorf(
-			"error processing %v: %v, skipping", i.OriginalName, err,
-		)
+		return fmt.Errorf("error processing %v: %v, skipping", i.OriginalName, err)
 	}
 	tm, err := x.DateTime()
 	if err != nil {
 		i.Process = false
-		return fmt.Errorf(
-			"error processing %v: %v, skipping", i.OriginalName, err,
-		)
+		return fmt.Errorf("error processing %v: %v, skipping", i.OriginalName, err)
 	}
 
 	i.ExifDate = tm
@@ -51,32 +60,34 @@ func (i *Image) ExtractExifDate() error {
 }
 
 // GenerateNewName according to the pattern (checks for duplicate names, too)
-func (i *Image) GenerateNewName(pattern string, newNames *map[string]int) error {
+func (i *Image) GenerateNewName(pattern string, newNames *map[string]int) {
 	path, _ := filepath.Split(i.OriginalName)
+	ext := strings.ToLower(filepath.Ext(i.OriginalName)) // all extensions lowercase for consistency
 	var newName string
 
 	switch pattern {
 	case "YYYY-MM-DD":
-		newName = i.ExifDate.Format("2006.01.02")
+		newName = i.ExifDate.Format("2006-01-02")
 	case "YYYY/MM/DD":
 		newName = i.ExifDate.Format("2006/01/02")
+	case "YYYY/MM-DD":
+		newName = i.ExifDate.Format("2006/01-02")
 	default:
-		return fmt.Errorf("unrecognized renaming pattern: %v", pattern)
+		newName = i.ExifDate.Format("2006-01-02")
 	}
 
 	// have we set this filename before already?
 	if seen, ok := (*newNames)[newName]; ok {
 		i.NewName = fmt.Sprintf(
-			"%s%s_%d.jpg", path, newName, seen+1,
+			"%s%s_%d%s", path, newName, seen+1, ext,
 		)
 		(*newNames)[newName]++
 	} else {
 		i.NewName = fmt.Sprintf(
-			"%s%s.jpg", path, newName,
+			"%s%s%s", path, newName, ext,
 		)
 		(*newNames)[newName] = 0
 	}
-	return nil
 }
 
 func (i *Image) Rename() error {
@@ -87,6 +98,7 @@ func (i *Image) Rename() error {
 		if err != nil {
 			return err
 		}
+		// make sure new files inherit original files' permissions
 		err = os.MkdirAll(dNew, dOrigPerm.Mode())
 		if err != nil {
 			return err
