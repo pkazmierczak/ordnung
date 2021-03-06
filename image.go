@@ -102,8 +102,9 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex 
 
 	// have we set this filename before already?
 	if seen, ok := (*newNames)[newName]; ok {
+		paddedSeen := fmt.Sprintf("%04d", seen+1)
 		i.NewName = fmt.Sprintf(
-			"%s%s_%d%s", path, newName, seen+1, ext,
+			"%s%s_%s%s", path, newName, paddedSeen, ext,
 		)
 		(*newNames)[newName]++
 	} else {
