@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/evanoberholster/imagemeta"
@@ -13,22 +13,12 @@ import (
 	"gopkg.in/djherbis/times.v1"
 )
 
-func dateFromFS(filename string) time.Time {
-	t, _ := times.Stat(filename)
-
-	if t.HasBirthTime() {
-		return t.BirthTime()
-	}
-
-	return t.ChangeTime()
-}
-
 // Image stores all the information about the image we're about to process (or
 // not)
 type Image struct {
 	OriginalName string
 	NewName      string
-	ExifDate     time.Time
+	Date         time.Time
 	Process      bool
 }
 
@@ -37,8 +27,9 @@ func New(name string) *Image {
 	return &Image{OriginalName: name, NewName: name, Process: true}
 }
 
-// ExtractExifDate extracts EXIF data from images
-func (i *Image) ExtractExifDate() error {
+// ExtractDate extracts EXIF data from images or gets the file creation date if
+// it cannot find one
+func (i *Image) ExtractDate() error {
 	f, err := os.Open(i.OriginalName)
 	if err != nil {
 		return err
@@ -63,37 +54,50 @@ func (i *Image) ExtractExifDate() error {
 		)
 	}
 
+	dateFromFS := func(filename string) time.Time {
+		t, _ := times.Stat(filename)
+
+		if t.HasBirthTime() {
+			return t.BirthTime()
+		}
+
+		return t.ChangeTime()
+	}
+
 	x, err := imagemeta.ScanExif(f)
 	if err != nil {
-		i.ExifDate = dateFromFS(i.OriginalName)
+		i.Date = dateFromFS(i.OriginalName)
 		return exifError(err)
 	}
 	tm, err := x.DateTime()
 	if err != nil {
-		i.ExifDate = dateFromFS(i.OriginalName)
+		i.Date = dateFromFS(i.OriginalName)
 		return exifError(err)
 	}
 
-	i.ExifDate = tm
+	i.Date = tm
 
 	return nil
 }
 
 // GenerateNewName according to the pattern (checks for duplicate names, too)
-func (i *Image) GenerateNewName(pattern string, newNames *map[string]int) {
+func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex *sync.Mutex) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
 	path, _ := filepath.Split(i.OriginalName)
 	ext := strings.ToLower(filepath.Ext(i.OriginalName)) // all extensions lowercase for consistency
 	var newName string
 
 	switch pattern {
 	case "YYYY-MM-DD":
-		newName = i.ExifDate.Format("2006-01-02")
+		newName = i.Date.Format("2006-01-02")
 	case "YYYY/MM/DD":
-		newName = i.ExifDate.Format("2006/01/02")
+		newName = i.Date.Format("2006/01/02")
 	case "YYYY/MM-DD":
-		newName = i.ExifDate.Format("2006/01-02")
+		newName = i.Date.Format("2006/01-02")
 	default:
-		newName = i.ExifDate.Format("2006-01-02")
+		newName = i.Date.Format("2006-01-02")
 	}
 
 	// have we set this filename before already?
@@ -125,32 +129,4 @@ func (i *Image) Rename() error {
 		}
 	}
 	return nil
-}
-
-// GetImages scans a directory (recursively) and returns an array of Image type
-// for the images found there. This function will only look for jpg and heic
-// files as these are the only file types we support for now.
-func GetImages(directory string) ([]*Image, error) {
-	images := make([]*Image, 0)
-
-	jpgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$")
-	if err != nil {
-		return images, err
-	}
-
-	if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
-		if err == nil && jpgRegexp.MatchString(info.Name()) {
-			img := New(path)
-			images = append(images, img)
-		}
-		return nil
-	}); err != nil {
-		return images, err
-	}
-
-	if len(images) == 0 {
-		return images, fmt.Errorf("no files found in %v", directory)
-	}
-
-	return images, nil
 }
