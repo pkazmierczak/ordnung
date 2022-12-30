@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"image"
 	_ "image/jpeg"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -23,7 +22,7 @@ func createRandomImage() (created *image.NRGBA) {
 }
 
 func TestImage_ExtractDate(t *testing.T) {
-	f, _ := os.CreateTemp("", "sample.jpg")
+	// f, _ := os.CreateTemp("", "sample.jpg")
 	type fields struct {
 		OriginalName string
 		NewName      string
