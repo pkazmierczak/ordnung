@@ -48,6 +48,7 @@ func getImages(done <-chan interface{}, directory string) <-chan *ordnung.Image 
 			log.Fatal(err)
 		}
 	}()
+
 	return images
 }
 

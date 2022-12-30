@@ -2,6 +2,7 @@ package ordnung
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/evanoberholster/imagemeta"
-	"github.com/evanoberholster/imagemeta/imagetype"
 	"gopkg.in/djherbis/times.v1"
 )
 
@@ -36,46 +36,40 @@ func (i *Image) ExtractDate() error {
 	}
 	defer f.Close()
 
-	// determines the file type, currently we support JPG and HEIC
-	t, err := imagetype.Scan(f)
+	m, err := imagemeta.Parse(f)
 	if err != nil {
-		return err
+		i.Process = false
+		return fmt.Errorf("unable to parse file: %v, skipping", i.OriginalName)
 	}
 
-	if t.IsUnknown() {
+	if m.ImageType().IsUnknown() {
 		i.Process = false
 		return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
 	}
 
-	exifError := func(err error) error {
+	// attempt to access exif metadata
+	e, _ := m.Exif()
+	if e != nil {
+		exifTime, err := e.DateTime(time.Local)
+		if err == nil {
+			i.Date = exifTime
+			fmt.Println(i.Date)
+		}
+	} else {
+		t, err := times.Stat(f.Name())
+		if err != nil {
+			i.Process = false
+			return fmt.Errorf("unable to stat file: %v, skipping", i.OriginalName)
+		}
+		if t.HasBirthTime() {
+			i.Date = t.BirthTime()
+		} else {
+			i.Date = t.ChangeTime()
+		}
 		return fmt.Errorf("error processing exif data for %v: %v, using file creation date instead",
-			i.OriginalName,
-			err,
+			i.OriginalName, err,
 		)
 	}
-
-	dateFromFS := func(filename string) time.Time {
-		t, _ := times.Stat(filename)
-
-		if t.HasBirthTime() {
-			return t.BirthTime()
-		}
-
-		return t.ChangeTime()
-	}
-
-	x, err := imagemeta.ScanExif(f)
-	if err != nil {
-		i.Date = dateFromFS(i.OriginalName)
-		return exifError(err)
-	}
-	tm, err := x.DateTime()
-	if err != nil {
-		i.Date = dateFromFS(i.OriginalName)
-		return exifError(err)
-	}
-
-	i.Date = tm
 
 	return nil
 }
@@ -96,6 +90,8 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex 
 		newName = i.Date.Format("2006/01/02")
 	case "YYYY/MM-DD":
 		newName = i.Date.Format("2006/01-02")
+	case "YYYY/YYYY-MM-DD":
+		newName = fmt.Sprintf("%s/%s", i.Date.Format("2006"), i.Date.Format("2006-01-02"))
 	default:
 		newName = i.Date.Format("2006-01-02")
 	}
@@ -109,25 +105,50 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex 
 		(*newNames)[newName]++
 	} else {
 		i.NewName = fmt.Sprintf(
-			"%s%s%s", path, newName, ext,
+			"%s%s_%s%s", path, newName, "0000", ext,
 		)
 		(*newNames)[newName] = 0
 	}
 }
 
 func (i *Image) Rename() error {
-	if err := os.Rename(i.OriginalName, i.NewName); os.IsNotExist(err) {
-		dNew, _ := filepath.Split(i.NewName)
-		dOrig, _ := filepath.Split(i.OriginalName)
-		dOrigPerm, err := os.Stat(dOrig)
-		if err != nil {
-			return err
+
+	// check if we need to create directories in order to rename
+	dNew, _ := filepath.Split(i.NewName)
+	dOrig, fOrig := filepath.Split(i.OriginalName)
+
+	if dNew != "" {
+
+		// if we're renaming into a directory structure, we want to ensure
+		// created directories inherit original files permission modes.
+		var dirPermissions fs.FileMode
+		if dOrig != "" {
+			st, _ := os.Stat(dOrig)
+			dirPermissions = st.Mode()
+		} else {
+			st, _ := os.Stat(fOrig)
+			dirPermissions = st.Mode()
 		}
+
+		if dirPermissions == 0 {
+			return fmt.Errorf("unable to stat original file: %v", i.OriginalName)
+		}
+
+		// apply directory bitmasks
+		dirPermissions = dirPermissions | 0111 | os.ModeDir
+
 		// make sure new files inherit original files' permissions
-		err = os.MkdirAll(dNew, dOrigPerm.Mode())
-		if err != nil {
-			return err
+		if dNew != "" {
+			err := os.MkdirAll(dNew, dirPermissions)
+			if err != nil {
+				return fmt.Errorf("error creating directory %v: %v", dNew, err)
+			}
 		}
 	}
+
+	if err := os.Rename(i.OriginalName, i.NewName); err != nil {
+		return err
+	}
+
 	return nil
 }
