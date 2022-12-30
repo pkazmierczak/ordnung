@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/schollz/progressbar/v3"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/pkazmierczak/ordnung"
@@ -23,31 +24,24 @@ var (
 	loglvl = flag.String("log-level", "info", "The log level")
 )
 
-// getImages scans a directory (recursively) and publishes found files to a
-// channel
-func getImages(done <-chan interface{}, directory string) <-chan *ordnung.Image {
-	images := make(chan *ordnung.Image)
-	go func() {
-		defer close(images)
-		// only JPG and HEIF images are supported for now
-		imgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$")
-		if err != nil {
-			log.Fatal(err)
-		}
+// getImages scans a directory (recursively) and prepares a list of files to
+// process
+func getImages(directory string) []*ordnung.Image {
+	images := make([]*ordnung.Image, 0)
+	// only JPG and HEIF images are supported for now
+	imgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-		if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
-			if err == nil && imgRegexp.MatchString(info.Name()) {
-				select {
-				case <-done:
-					return nil
-				case images <- ordnung.New(path):
-				}
-			}
-			return nil
-		}); err != nil {
-			log.Fatal(err)
+	if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
+		if err == nil && imgRegexp.MatchString(info.Name()) {
+			images = append(images, ordnung.New(path))
 		}
-	}()
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	return images
 }
@@ -146,8 +140,18 @@ Options:
 	done := make(chan interface{})
 	defer close(done)
 
-	// find image files
-	images := getImages(done, arg[0])
+	// find image files and create a progress bar
+	imageFiles := getImages(arg[0])
+	bar := progressbar.Default(int64(len(imageFiles)), "renaming")
+
+	// send all the filenames to a channel
+	images := make(chan *ordnung.Image)
+	go func() {
+		for _, i := range imageFiles {
+			images <- i
+		}
+		defer close(images)
+	}()
 
 	// rename concurrently
 	workers := make([]<-chan string, *numWorkers)
@@ -156,6 +160,10 @@ Options:
 	}
 
 	for r := range fanIn(done, workers...) {
-		fmt.Println(r)
+		if *dryRun {
+			fmt.Println(r)
+		} else {
+			bar.Add(1)
+		}
 	}
 }
