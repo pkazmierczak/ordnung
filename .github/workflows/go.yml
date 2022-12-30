@@ -34,17 +34,6 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Staticcheck
-        run: |
-          go get -u honnef.co/go/tools/cmd/staticcheck
-          staticcheck -checks all ./...
-      - name: Review security
-        run: go get github.com/securego/gosec/cmd/gosec; gosec ./...
-
       - name: Test build
         run: go build .
         
-      - name: actions-goveralls
-        uses: shogo82148/actions-goveralls@v1.4.0
-        with:
-          path-to-profile: covprofile
