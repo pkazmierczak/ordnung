@@ -53,7 +53,6 @@ func (i *Image) ExtractDate() error {
 		exifTime, err := e.DateTime(time.Local)
 		if err == nil {
 			i.Date = exifTime
-			fmt.Println(i.Date)
 		}
 	} else {
 		t, err := times.Stat(f.Name())
