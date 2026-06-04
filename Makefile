@@ -11,10 +11,25 @@ ifeq ($(GITCOMMIT),)
 endif
 
 # set LDFLAGS and inject version information
-CTIMEVAR=-X github.com/pkazmierczak/ordnung/version.GITCOMMIT=$(GITCOMMIT) -X github.com/pkazmierczak/ordnung/version.VERSION=$(VERSION)
+CTIMEVAR=-X github.com/pkazmierczak/ordnung/internal/version.GITCOMMIT=$(GITCOMMIT) -X github.com/pkazmierczak/ordnung/internal/version.VERSION=$(VERSION)
 GO_LDFLAGS=-ldflags "-w $(CTIMEVAR)"
 
+.PHONY: release install test vet fmt check
+
 release:
-	CGO_ENABLED=0 go build ${GO_LDFLAGS} -o ordnung cmd/ordnung/main.go
+	CGO_ENABLED=0 go build ${GO_LDFLAGS} -o ordnung ./cmd/ordnung
+
 install:
 	cp ordnung /usr/local/bin
+
+test:
+	go test ./...
+
+vet:
+	go vet ./...
+
+fmt:
+	gofmt -l -w .
+
+# Run the full set of checks (formatting, vet, tests) the way CI does.
+check: vet test

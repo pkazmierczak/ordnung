@@ -13,7 +13,7 @@ import (
 	"github.com/schollz/progressbar/v3"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/pkazmierczak/ordnung"
+	"github.com/pkazmierczak/ordnung/internal/ordnung"
 )
 
 var (
