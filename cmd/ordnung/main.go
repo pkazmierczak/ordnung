@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,14 +29,17 @@ var (
 // process
 func getImages(directory string) []*ordnung.Image {
 	images := make([]*ordnung.Image, 0)
-	// only JPG and HEIF images are supported for now
-	imgRegexp, err := regexp.Compile("^.+\\.(jpg|jpeg|JPG|JPEG|heic|HEIC)$")
-	if err != nil {
-		log.Fatal(err)
-	}
+	// only JPG and HEIF images are supported for now (case-insensitive)
+	imgRegexp := regexp.MustCompile(`(?i)\.(jpg|jpeg|heic|heif)$`)
 
-	if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
-		if err == nil && imgRegexp.MatchString(info.Name()) {
+	if err := filepath.WalkDir(directory, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Don't abort the whole walk because one entry was unreadable;
+			// log it and keep going.
+			log.Warnf("skipping %s: %v", path, err)
+			return nil
+		}
+		if !d.IsDir() && imgRegexp.MatchString(d.Name()) {
 			images = append(images, ordnung.New(path))
 		}
 		return nil
@@ -50,28 +54,32 @@ func getImages(directory string) []*ordnung.Image {
 func renameImages(
 	done <-chan interface{},
 	images <-chan *ordnung.Image,
-	newNames map[string]int,
+	reserved map[string]struct{},
 	mutex *sync.Mutex,
 ) <-chan string {
 	results := make(chan string)
 	go func() {
 		defer close(results)
 		for img := range images {
+			var msg string
 			if err := img.ExtractDate(); err != nil {
 				log.Warn(err)
 			}
 			if img.Process {
-				img.GenerateNewName(*pattern, &newNames, mutex)
+				img.GenerateNewName(*pattern, reserved, mutex)
 				if !*dryRun {
 					if err := img.Rename(); err != nil {
 						log.Errorln(err)
 					}
 				}
-				select {
-				case <-done:
-					return
-				case results <- fmt.Sprintf("%s ⇨ %s", img.OriginalName, img.NewName):
-				}
+				msg = fmt.Sprintf("%s ⇨ %s", img.OriginalName, img.NewName)
+			}
+			// Always emit one signal per consumed image (msg is empty for
+			// skipped files) so the consumer can keep the progress bar accurate.
+			select {
+			case <-done:
+				return
+			case results <- msg:
 			}
 		}
 	}()
@@ -134,7 +142,7 @@ Options:
 	}
 
 	// keep track of all the new names we're creating to avoid conflicts
-	newNames := map[string]int{}
+	reserved := map[string]struct{}{}
 
 	var mutex sync.Mutex
 	done := make(chan interface{})
@@ -147,21 +155,23 @@ Options:
 	// send all the filenames to a channel
 	images := make(chan *ordnung.Image)
 	go func() {
+		defer close(images)
 		for _, i := range imageFiles {
 			images <- i
 		}
-		defer close(images)
 	}()
 
 	// rename concurrently
 	workers := make([]<-chan string, *numWorkers)
 	for i := 0; i < *numWorkers; i++ {
-		workers[i] = renameImages(done, images, newNames, &mutex)
+		workers[i] = renameImages(done, images, reserved, &mutex)
 	}
 
 	for r := range fanIn(done, workers...) {
 		if *dryRun {
-			fmt.Println(r)
+			if r != "" {
+				fmt.Println(r)
+			}
 		} else {
 			bar.Add(1)
 		}
