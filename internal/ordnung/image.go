@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/evanoberholster/imagemeta"
@@ -20,11 +22,39 @@ type Image struct {
 	NewName      string
 	Date         time.Time
 	Process      bool
+
+	// Sidecar is the path to an associated XMP sidecar file that shares the
+	// image's base name (e.g. "IMG_1234.xmp" next to "IMG_1234.jpg"), or "" if
+	// the image has none. Sidecars carry no EXIF data of their own; they follow
+	// the image, taking the same target name with their own extension.
+	Sidecar string
+	// SidecarNewName is the sidecar's computed target, set by GenerateNewName
+	// alongside NewName whenever Sidecar is non-empty.
+	SidecarNewName string
 }
 
 // New creates a new Image object
 func New(name string) *Image {
 	return &Image{OriginalName: name, NewName: name, Process: true}
+}
+
+// FindSidecar returns the path to an XMP sidecar file that shares imagePath's
+// base name, or "" if none exists. The sidecar is expected to differ from the
+// image only in extension (e.g. "IMG_1234.jpg" -> "IMG_1234.xmp"). Both common
+// extension casings are probed so the lookup works on case-sensitive
+// filesystems too.
+func FindSidecar(imagePath string) string {
+	base := strings.TrimSuffix(imagePath, filepath.Ext(imagePath))
+	for _, ext := range []string{".xmp", ".XMP"} {
+		candidate := base + ext
+		if candidate == imagePath {
+			continue
+		}
+		if info, err := os.Lstat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // ExtractDate extracts EXIF data from images or gets the file creation date if

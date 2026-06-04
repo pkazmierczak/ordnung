@@ -96,6 +96,14 @@ func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}) {
 
 		reserved[candidate] = struct{}{}
 		i.NewName = candidate
+		if i.Sidecar != "" {
+			// The sidecar mirrors the image: same target base and counter, but
+			// keeps its own (lowercased) extension. Reserving the image slot is
+			// enough to keep sidecars of different images apart, since distinct
+			// images get distinct counters.
+			sidecarExt := strings.ToLower(filepath.Ext(i.Sidecar))
+			i.SidecarNewName = strings.TrimSuffix(candidate, ext) + sidecarExt
+		}
 		return
 	}
 }

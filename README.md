@@ -2,6 +2,10 @@
 
 `ordnung` is a simple CLI program that renames photos according to their EXIF data.
 
+If a photo has an XMP sidecar next to it (a file with the same base name and an
+`.xmp` extension, e.g. `IMG_1234.xmp` beside `IMG_1234.jpg`), the sidecar is
+renamed in lockstep with the photo so the two stay paired.
+
 ```
 $ ./ordnung -h
 ```
@@ -31,7 +35,7 @@ The code is organized as a standard Go CLI:
 - `cmd/ordnung` — the command-line entry point (flag parsing, the scan ->
   extract -> assign -> rename pipeline).
 - `internal/ordnung` — the core library: the `Image` model and EXIF date
-  extraction (`image.go`), target-name generation (`name.go`), and the
+  extraction (`image.go`), target-name generation (`target.go`), and the
   on-disk rename (`rename.go`), each with a matching `_test.go`.
 - `internal/version` — build metadata injected at link time by the `Makefile`.
 

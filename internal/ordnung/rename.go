@@ -6,35 +6,50 @@ import (
 	"path/filepath"
 )
 
-// Rename moves the image from its original path to its computed NewName. It is
-// a no-op when the file is already correctly named, refuses to overwrite a
-// different file, and creates any destination subdirectories required by the
-// pattern.
+// Rename moves the image to its computed NewName and, if the image has an XMP
+// sidecar, moves that to SidecarNewName too. Each move is a no-op when the file
+// is already correctly named, refuses to overwrite a different file, and
+// creates any destination subdirectories required by the pattern.
 func (i *Image) Rename() error {
+	if err := moveFile(i.OriginalName, i.NewName); err != nil {
+		return err
+	}
+	if i.Sidecar != "" {
+		if err := moveFile(i.Sidecar, i.SidecarNewName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// moveFile relocates src to dst. It is a no-op when dst equals src, refuses to
+// overwrite a *different* existing file, and creates any parent directories
+// required by dst (inheriting the source parent's permission bits).
+func moveFile(src, dst string) error {
 	// Nothing to do if the file is already named correctly. Avoids a needless
 	// syscall and keeps repeated runs side-effect free.
-	if i.NewName == i.OriginalName {
+	if dst == src {
 		return nil
 	}
 
-	srcInfo, err := os.Lstat(i.OriginalName)
+	srcInfo, err := os.Lstat(src)
 	if err != nil {
-		return fmt.Errorf("unable to stat source file %v: %v", i.OriginalName, err)
+		return fmt.Errorf("unable to stat source file %v: %v", src, err)
 	}
 
 	// Final safety net: never overwrite a *different* file that already occupies
 	// the target name. GenerateNewName should already guarantee this, but the
 	// check guards against races and changes made by other processes. SameFile
 	// allows a case-only rename (e.g. .JPG -> .jpg) on case-insensitive volumes.
-	if dstInfo, err := os.Lstat(i.NewName); err == nil && !os.SameFile(srcInfo, dstInfo) {
-		return fmt.Errorf("refusing to overwrite existing file: %v", i.NewName)
+	if dstInfo, err := os.Lstat(dst); err == nil && !os.SameFile(srcInfo, dstInfo) {
+		return fmt.Errorf("refusing to overwrite existing file: %v", dst)
 	}
 
 	// If the pattern renames into a directory structure, create it, inheriting
 	// the permission bits of the source's parent directory.
-	dNew, _ := filepath.Split(i.NewName)
+	dNew, _ := filepath.Split(dst)
 	if dNew != "" {
-		dOrig, _ := filepath.Split(i.OriginalName)
+		dOrig, _ := filepath.Split(src)
 		if dOrig == "" {
 			dOrig = "."
 		}
@@ -48,8 +63,8 @@ func (i *Image) Rename() error {
 		}
 	}
 
-	if err := os.Rename(i.OriginalName, i.NewName); err != nil {
-		return fmt.Errorf("error renaming %v to %v: %v", i.OriginalName, i.NewName, err)
+	if err := os.Rename(src, dst); err != nil {
+		return fmt.Errorf("error renaming %v to %v: %v", src, dst, err)
 	}
 
 	return nil

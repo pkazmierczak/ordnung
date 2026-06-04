@@ -42,7 +42,11 @@ func getImages(directory string) []*ordnung.Image {
 			return nil
 		}
 		if !d.IsDir() && imgRegexp.MatchString(d.Name()) {
-			images = append(images, ordnung.New(path))
+			img := ordnung.New(path)
+			// Attach an XMP sidecar (same base name) if one sits beside it, so it
+			// gets renamed in lockstep with the image.
+			img.Sidecar = ordnung.FindSidecar(path)
+			images = append(images, img)
 		}
 		return nil
 	}); err != nil {
@@ -176,6 +180,9 @@ Options:
 	if *dryRun {
 		for _, img := range toRename {
 			fmt.Printf("%s ⇨ %s\n", img.OriginalName, img.NewName)
+			if img.Sidecar != "" {
+				fmt.Printf("%s ⇨ %s\n", img.Sidecar, img.SidecarNewName)
+			}
 		}
 		return
 	}
