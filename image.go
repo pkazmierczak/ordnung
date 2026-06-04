@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/evanoberholster/imagemeta"
@@ -37,34 +36,32 @@ func (i *Image) ExtractDate() error {
 	}
 	defer f.Close()
 
-	e, err := imagemeta.Decode(f)
+	m, err := imagemeta.Parse(f)
 	if err != nil {
-		// No EXIF block at all: not fatal, fall back to filesystem times.
-		if errors.Is(err, imagemeta.ErrNoExif) {
-			return i.dateFromFile(f.Name(), err)
-		}
-		// Unrecognized image type: nothing we can do, skip it.
-		if errors.Is(err, imagemeta.ErrImageTypeNotFound) {
-			i.Process = false
-			return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
-		}
 		i.Process = false
 		return fmt.Errorf("unable to parse file: %v, skipping", i.OriginalName)
 	}
 
-	if e.ImageType.IsUnknown() {
+	if m.ImageType().IsUnknown() {
 		i.Process = false
 		return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
 	}
 
-	// Prefer the EXIF capture date (DateTimeOriginal, then CreateDate, then
-	// ModifyDate). If none is present, fall back to the filesystem times.
-	if d := e.SelectedDate(); !d.IsZero() {
-		i.Date = d
-		return nil
+	// Prefer the EXIF capture date. Fall back to filesystem times if the image
+	// has no EXIF block or no usable DateTime (non-fatal: the file is still
+	// processed, but the returned error reports which source was used).
+	e, _ := m.Exif()
+	if e == nil {
+		return i.dateFromFile(f.Name(), errors.New("no EXIF metadata found"))
 	}
 
-	return i.dateFromFile(f.Name(), errors.New("no EXIF date found"))
+	exifTime, err := e.DateTime(time.Local)
+	if err != nil {
+		return i.dateFromFile(f.Name(), err)
+	}
+
+	i.Date = exifTime
+	return nil
 }
 
 // dateFromFile sets i.Date from the filesystem birth (or change) time. It is
@@ -108,9 +105,11 @@ func timeSuffix(t time.Time) string {
 
 // GenerateNewName computes a collision-free target name for the image.
 //
-// reserved is the shared set of names already claimed during this run; mutex
-// guards both the claim-and-reserve step and the on-disk existence checks so
-// that concurrent workers can never select the same destination.
+// reserved is the set of names already claimed during this run. It is not
+// safe for concurrent use: callers must invoke GenerateNewName from a single
+// goroutine (see the deterministic phase-2 pass in cmd/ordnung). Assigning
+// names single-threaded over a sorted input is what makes the dry-run plan
+// match the real run exactly.
 //
 // The chosen name is guaranteed not to clobber anything: it is skipped if it
 // is already reserved by another image or if a *different* file already exists
@@ -118,10 +117,7 @@ func timeSuffix(t time.Time) string {
 // itself (i.e. it is already named correctly, or differs only in extension
 // case on a case-insensitive filesystem), the name is claimed as-is, which
 // makes repeated runs idempotent and order-independent.
-func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}, mutex *sync.Mutex) {
-	mutex.Lock()
-	defer mutex.Unlock()
-
+func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}) {
 	dir, _ := filepath.Split(i.OriginalName)
 	ext := strings.ToLower(filepath.Ext(i.OriginalName)) // all extensions lowercase for consistency
 	var datePart string

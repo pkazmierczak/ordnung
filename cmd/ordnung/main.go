@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"sync"
 
 	"github.com/schollz/progressbar/v3"
@@ -50,69 +51,90 @@ func getImages(directory string) []*ordnung.Image {
 	return images
 }
 
-// rename images and publish results to a channel
-func renameImages(
-	done <-chan interface{},
-	images <-chan *ordnung.Image,
-	reserved map[string]struct{},
-	mutex *sync.Mutex,
-) <-chan string {
-	results := make(chan string)
-	go func() {
-		defer close(results)
-		for img := range images {
-			var msg string
-			if err := img.ExtractDate(); err != nil {
-				log.Warn(err)
+// parallelDo runs fn over every image using the given number of workers. It
+// blocks until all images have been processed.
+func parallelDo(images []*ordnung.Image, workers int, fn func(*ordnung.Image)) {
+	if workers < 1 {
+		workers = 1
+	}
+
+	jobs := make(chan *ordnung.Image)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for img := range jobs {
+				fn(img)
 			}
-			if img.Process {
-				img.GenerateNewName(*pattern, reserved, mutex)
-				if !*dryRun {
-					if err := img.Rename(); err != nil {
-						log.Errorln(err)
-					}
-				}
-				msg = fmt.Sprintf("%s ⇨ %s", img.OriginalName, img.NewName)
-			}
-			// Always emit one signal per consumed image (msg is empty for
-			// skipped files) so the consumer can keep the progress bar accurate.
-			select {
-			case <-done:
-				return
-			case results <- msg:
-			}
-		}
-	}()
-	return results
+		}()
+	}
+
+	for _, img := range images {
+		jobs <- img
+	}
+	close(jobs)
+	wg.Wait()
 }
 
-func fanIn(done <-chan interface{}, channels ...<-chan string) <-chan string {
-	var wg sync.WaitGroup
-	multiplexedStream := make(chan string)
+// extractDates reads the capture date of every image. This is the expensive,
+// EXIF-decoding stage, so it runs concurrently.
+func extractDates(images []*ordnung.Image, workers int, showBar bool) {
+	var bar *progressbar.ProgressBar
+	if showBar {
+		bar = progressbar.Default(int64(len(images)), "reading metadata")
+	} else {
+		log.Infof("reading metadata from %d files", len(images))
+	}
 
-	// combine streams from all the channels
-	multiplex := func(c <-chan string) {
-		defer wg.Done()
-		for i := range c {
-			select {
-			case <-done:
-				return
-			case multiplexedStream <- i:
-			}
+	parallelDo(images, workers, func(img *ordnung.Image) {
+		if err := img.ExtractDate(); err != nil {
+			log.Warn(err)
 		}
+		if bar != nil {
+			bar.Add(1)
+		}
+	})
+}
+
+// assignNames computes the target name for every processable image. It runs
+// single-threaded over a stably sorted slice so the assignment (and therefore
+// the entire plan a dry run prints) is fully deterministic and independent of
+// worker scheduling. It returns the images that should actually be renamed.
+func assignNames(images []*ordnung.Image, pattern string) []*ordnung.Image {
+	// Order by capture date, with the original path as a stable tie-break.
+	// Only images taken within the same second share a name base, so this
+	// fixes their counter assignment ("-00", "-01", ...) deterministically.
+	sort.SliceStable(images, func(a, b int) bool {
+		ia, ib := images[a], images[b]
+		if !ia.Date.Equal(ib.Date) {
+			return ia.Date.Before(ib.Date)
+		}
+		return ia.OriginalName < ib.OriginalName
+	})
+
+	reserved := make(map[string]struct{}, len(images))
+	toRename := make([]*ordnung.Image, 0, len(images))
+	for _, img := range images {
+		if !img.Process {
+			continue
+		}
+		img.GenerateNewName(pattern, reserved)
+		toRename = append(toRename, img)
 	}
+	return toRename
+}
 
-	wg.Add(len(channels))
-	for _, c := range channels {
-		go multiplex(c)
-	}
-
-	go func() {
-		wg.Wait()
-		close(multiplexedStream)
-	}()
-
-	return multiplexedStream
+// applyRenames performs the renames concurrently. Every target name is unique
+// and never equals another image's source, so the renames are independent.
+func applyRenames(images []*ordnung.Image, workers int) {
+	bar := progressbar.Default(int64(len(images)), "renaming")
+	parallelDo(images, workers, func(img *ordnung.Image) {
+		if err := img.Rename(); err != nil {
+			log.Errorln(err)
+		}
+		bar.Add(1)
+	})
 }
 
 func main() {
@@ -141,39 +163,20 @@ Options:
 		os.Exit(1)
 	}
 
-	// keep track of all the new names we're creating to avoid conflicts
-	reserved := map[string]struct{}{}
-
-	var mutex sync.Mutex
-	done := make(chan interface{})
-	defer close(done)
-
-	// find image files and create a progress bar
 	imageFiles := getImages(arg[0])
-	bar := progressbar.Default(int64(len(imageFiles)), "renaming")
 
-	// send all the filenames to a channel
-	images := make(chan *ordnung.Image)
-	go func() {
-		defer close(images)
-		for _, i := range imageFiles {
-			images <- i
+	// Phase 1: extract capture dates (parallel, the slow part).
+	extractDates(imageFiles, *numWorkers, !*dryRun)
+
+	// Phase 2: assign target names deterministically (single-threaded).
+	toRename := assignNames(imageFiles, *pattern)
+
+	// Phase 3: report the plan (dry run) or apply it (parallel).
+	if *dryRun {
+		for _, img := range toRename {
+			fmt.Printf("%s ⇨ %s\n", img.OriginalName, img.NewName)
 		}
-	}()
-
-	// rename concurrently
-	workers := make([]<-chan string, *numWorkers)
-	for i := 0; i < *numWorkers; i++ {
-		workers[i] = renameImages(done, images, reserved, &mutex)
+		return
 	}
-
-	for r := range fanIn(done, workers...) {
-		if *dryRun {
-			if r != "" {
-				fmt.Println(r)
-			}
-		} else {
-			bar.Add(1)
-		}
-	}
+	applyRenames(toRename, *numWorkers)
 }
