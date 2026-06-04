@@ -33,15 +33,22 @@ var (
 // getImages scans a directory (recursively) and prepares a list of files to
 // process. When keepLive is false, each still is also probed for an Apple Live
 // Photo .mov part sharing its base name, which is marked for deletion. When
-// includeVideos is true, standalone videos are added as renameable files too —
-// except any .mov already claimed for deletion as a Live Photo part, so a
-// still's video is never both deleted and renamed.
+// includeVideos is true, standalone videos are added as renameable files too
+// (each with any XMP sidecar of its own) — except a .mov that a still has
+// claimed as its Live Photo part, so a still's video is never both renamed and
+// deleted.
+//
+// Claimed parts are matched by file identity (os.SameFile), not by path string:
+// FindLiveVideo probes ".mov" before ".MOV", so on a case-insensitive
+// filesystem it reports the lowercase candidate while WalkDir yields the real
+// name. A string comparison would miss that, letting the Live Photo video into
+// the rename set where it would race its own deletion during apply.
 func getImages(directory string, keepLive, includeVideos bool) []*ordnung.Image {
 	stills := make([]*ordnung.Image, 0)
 	videoPaths := make([]string, 0)
-	// Set of .mov paths that will be deleted as Live Photo parts; videos in it
-	// must not also be queued for renaming.
-	deleteVideos := make(map[string]struct{})
+	// FileInfos of the .mov parts a still has claimed for deletion, used to
+	// exclude them from standalone video processing by identity.
+	var claimed []os.FileInfo
 
 	if err := filepath.WalkDir(directory, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -64,7 +71,9 @@ func getImages(directory string, keepLive, includeVideos bool) []*ordnung.Image 
 			if !keepLive {
 				if v := ordnung.FindLiveVideo(path); v != "" {
 					img.LiveVideo = v
-					deleteVideos[v] = struct{}{}
+					if fi, err := os.Lstat(v); err == nil {
+						claimed = append(claimed, fi)
+					}
 				}
 			}
 			stills = append(stills, img)
@@ -78,14 +87,37 @@ func getImages(directory string, keepLive, includeVideos bool) []*ordnung.Image 
 
 	images := stills
 	for _, v := range videoPaths {
-		// Skip videos that a still has claimed as a Live Photo part to delete.
-		if _, del := deleteVideos[v]; del {
+		// Skip a video that a still has claimed as a Live Photo part to delete.
+		if claimedForDeletion(v, claimed) {
 			continue
 		}
-		images = append(images, ordnung.New(v))
+		vid := ordnung.New(v)
+		// A standalone video may carry its own XMP sidecar; rename it in
+		// lockstep, exactly as for stills.
+		vid.Sidecar = ordnung.FindSidecar(v)
+		images = append(images, vid)
 	}
 
 	return images
+}
+
+// claimedForDeletion reports whether path refers to the same file as any of the
+// claimed Live Photo video parts. It compares by identity (os.SameFile) so a
+// case-only filename difference on a case-insensitive filesystem still matches.
+func claimedForDeletion(path string, claimed []os.FileInfo) bool {
+	if len(claimed) == 0 {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	for _, c := range claimed {
+		if os.SameFile(info, c) {
+			return true
+		}
+	}
+	return false
 }
 
 // parallelDo runs fn over every image using the given number of workers. It

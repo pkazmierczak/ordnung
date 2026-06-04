@@ -6,9 +6,10 @@ Videos (`.mov`, `.mp4`, `.m4v`) can be renamed too, using the creation date
 embedded in their QuickTime/ISO-BMFF metadata. Video handling is opt-in via the
 `-videos` flag.
 
-If a photo has an XMP sidecar next to it (a file with the same base name and an
-`.xmp` extension, e.g. `IMG_1234.xmp` beside `IMG_1234.jpg`), the sidecar is
-renamed in lockstep with the photo so the two stay paired.
+If a photo (or a standalone video) has an XMP sidecar next to it (a file with
+the same base name and an `.xmp` extension, e.g. `IMG_1234.xmp` beside
+`IMG_1234.jpg`), the sidecar is renamed in lockstep with it so the two stay
+paired.
 
 Apple Photos exports of "unmodified originals" produce a Live Photo as a HEIC
 (or JPG) still plus a same-named `.mov` video part (e.g. `IMG_1234.mov` beside
