@@ -7,9 +7,11 @@ import (
 )
 
 // Rename moves the image to its computed NewName and, if the image has an XMP
-// sidecar, moves that to SidecarNewName too. Each move is a no-op when the file
-// is already correctly named, refuses to overwrite a different file, and
-// creates any destination subdirectories required by the pattern.
+// sidecar, moves that to SidecarNewName too. If the image has an associated
+// Live Photo video part (LiveVideo), that video is deleted. Each move is a
+// no-op when the file is already correctly named, refuses to overwrite a
+// different file, and creates any destination subdirectories required by the
+// pattern.
 func (i *Image) Rename() error {
 	if err := moveFile(i.OriginalName, i.NewName); err != nil {
 		return err
@@ -17,6 +19,14 @@ func (i *Image) Rename() error {
 	if i.Sidecar != "" {
 		if err := moveFile(i.Sidecar, i.SidecarNewName); err != nil {
 			return err
+		}
+	}
+	if i.LiveVideo != "" {
+		// Drop the Live Photo video part. Tolerate an already-absent file so
+		// the rare case of two stills (e.g. a HEIC and a JPG) sharing one .mov
+		// stays idempotent: the first image deletes it, the second no-ops.
+		if err := os.Remove(i.LiveVideo); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("error removing live photo video %v: %v", i.LiveVideo, err)
 		}
 	}
 	return nil

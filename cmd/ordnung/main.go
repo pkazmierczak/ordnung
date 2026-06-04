@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"sync"
 
@@ -24,15 +23,25 @@ var (
 - YYYY/MM/DD
 - YYYY/MM/YYYY-MM-DD
 - YYYY/MM-DD`)
-	loglvl = flag.String("log-level", "info", "The log level")
+	loglvl         = flag.String("log-level", "info", "The log level")
+	keepLivePhotos = flag.Bool("keep-live-photos", false,
+		"Keep Apple Live Photo .mov parts? When false (the default), a .mov is deleted if a same-named HEIC or JPG still sits beside it.")
+	includeVideos = flag.Bool("videos", false,
+		"Also rename video files (.mov/.mp4/.m4v) using their embedded creation date.")
 )
 
 // getImages scans a directory (recursively) and prepares a list of files to
-// process
-func getImages(directory string) []*ordnung.Image {
-	images := make([]*ordnung.Image, 0)
-	// only JPG and HEIF images are supported for now (case-insensitive)
-	imgRegexp := regexp.MustCompile(`(?i)\.(jpg|jpeg|heic|heif)$`)
+// process. When keepLive is false, each still is also probed for an Apple Live
+// Photo .mov part sharing its base name, which is marked for deletion. When
+// includeVideos is true, standalone videos are added as renameable files too —
+// except any .mov already claimed for deletion as a Live Photo part, so a
+// still's video is never both deleted and renamed.
+func getImages(directory string, keepLive, includeVideos bool) []*ordnung.Image {
+	stills := make([]*ordnung.Image, 0)
+	videoPaths := make([]string, 0)
+	// Set of .mov paths that will be deleted as Live Photo parts; videos in it
+	// must not also be queued for renaming.
+	deleteVideos := make(map[string]struct{})
 
 	if err := filepath.WalkDir(directory, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -41,16 +50,39 @@ func getImages(directory string) []*ordnung.Image {
 			log.Warnf("skipping %s: %v", path, err)
 			return nil
 		}
-		if !d.IsDir() && imgRegexp.MatchString(d.Name()) {
+		if d.IsDir() {
+			return nil
+		}
+		switch {
+		case ordnung.IsStill(d.Name()):
 			img := ordnung.New(path)
 			// Attach an XMP sidecar (same base name) if one sits beside it, so it
 			// gets renamed in lockstep with the image.
 			img.Sidecar = ordnung.FindSidecar(path)
-			images = append(images, img)
+			// Unless we're keeping Live Photos, attach a same-named .mov video
+			// part so it gets deleted when the still is processed.
+			if !keepLive {
+				if v := ordnung.FindLiveVideo(path); v != "" {
+					img.LiveVideo = v
+					deleteVideos[v] = struct{}{}
+				}
+			}
+			stills = append(stills, img)
+		case includeVideos && ordnung.IsVideo(d.Name()):
+			videoPaths = append(videoPaths, path)
 		}
 		return nil
 	}); err != nil {
 		log.Fatal(err)
+	}
+
+	images := stills
+	for _, v := range videoPaths {
+		// Skip videos that a still has claimed as a Live Photo part to delete.
+		if _, del := deleteVideos[v]; del {
+			continue
+		}
+		images = append(images, ordnung.New(v))
 	}
 
 	return images
@@ -168,7 +200,7 @@ Options:
 		os.Exit(1)
 	}
 
-	imageFiles := getImages(arg[0])
+	imageFiles := getImages(arg[0], *keepLivePhotos, *includeVideos)
 
 	// Phase 1: extract capture dates (parallel, the slow part).
 	extractDates(imageFiles, *numWorkers, !*dryRun)
@@ -182,6 +214,9 @@ Options:
 			fmt.Printf("%s ⇨ %s\n", img.OriginalName, img.NewName)
 			if img.Sidecar != "" {
 				fmt.Printf("%s ⇨ %s\n", img.Sidecar, img.SidecarNewName)
+			}
+			if img.LiveVideo != "" {
+				fmt.Printf("%s ✗ (live photo video, deleted)\n", img.LiveVideo)
 			}
 		}
 		return

@@ -8,12 +8,30 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/evanoberholster/imagemeta"
 	"gopkg.in/djherbis/times.v1"
 )
+
+var (
+	// stillExtRegexp matches the still-image extensions ordnung can read EXIF
+	// from (case-insensitive).
+	stillExtRegexp = regexp.MustCompile(`(?i)\.(jpg|jpeg|heic|heif)$`)
+	// videoExtRegexp matches the video extensions ordnung can read a creation
+	// date from (case-insensitive).
+	videoExtRegexp = regexp.MustCompile(`(?i)\.(mov|mp4|m4v)$`)
+)
+
+// IsStill reports whether path names a supported still-image file, judged by
+// its extension.
+func IsStill(path string) bool { return stillExtRegexp.MatchString(path) }
+
+// IsVideo reports whether path names a supported video file, judged by its
+// extension.
+func IsVideo(path string) bool { return videoExtRegexp.MatchString(path) }
 
 // Image stores all the information about the image we're about to process (or
 // not)
@@ -31,6 +49,13 @@ type Image struct {
 	// SidecarNewName is the sidecar's computed target, set by GenerateNewName
 	// alongside NewName whenever Sidecar is non-empty.
 	SidecarNewName string
+
+	// LiveVideo is the path to an associated Apple "Live Photo" video part: a
+	// .mov sharing the image's base name (e.g. "IMG_1234.mov" next to
+	// "IMG_1234.heic"), or "" if the image has none or Live Photos are being
+	// kept. Unlike a sidecar, the video is not renamed but deleted when the
+	// image is processed, collapsing an exported Live Photo down to its still.
+	LiveVideo string
 }
 
 // New creates a new Image object
@@ -57,9 +82,34 @@ func FindSidecar(imagePath string) string {
 	return ""
 }
 
-// ExtractDate extracts EXIF data from images or gets the file creation date if
-// it cannot find one
+// FindLiveVideo returns the path to an Apple "Live Photo" video part that
+// shares imagePath's base name (e.g. "IMG_1234.heic" -> "IMG_1234.mov"), or ""
+// if none exists. Exporting "unmodified originals" from Apple Photos yields a
+// HEIC or JPG still alongside a same-named .mov; this locates that video so it
+// can be removed. Both extension casings are probed so the lookup works on
+// case-sensitive filesystems too.
+func FindLiveVideo(imagePath string) string {
+	base := strings.TrimSuffix(imagePath, filepath.Ext(imagePath))
+	for _, ext := range []string{".mov", ".MOV"} {
+		candidate := base + ext
+		if candidate == imagePath {
+			continue
+		}
+		if info, err := os.Lstat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// ExtractDate extracts the capture date from the file, falling back to the file
+// creation date if it cannot find one. Stills are read via EXIF; videos are
+// read from their QuickTime/ISO-BMFF metadata (see extractVideoDate).
 func (i *Image) ExtractDate() error {
+	if IsVideo(i.OriginalName) {
+		return i.extractVideoDate()
+	}
+
 	f, err := os.Open(i.OriginalName)
 	if err != nil {
 		return err
