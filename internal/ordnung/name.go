@@ -60,6 +60,12 @@ func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}) {
 		datePart = i.Date.Format("2006-01-02")
 	}
 
+	// Patterns express subdirectories with "/"; translate those to the OS path
+	// separator so generated names use native separators (e.g. backslashes on
+	// Windows). Without this, names would mix separators and the separator-
+	// sensitive collision checks below could miss an already-claimed slot.
+	datePart = filepath.FromSlash(datePart)
+
 	// The base name encodes the date (from the pattern) plus a time-derived
 	// suffix that keeps same-day images ordered. base sorts chronologically.
 	base := fmt.Sprintf("%s%s_%s", dir, datePart, timeSuffix(i.Date))
