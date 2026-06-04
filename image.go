@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,25 @@ func (i *Image) ExtractDate() error {
 	return nil
 }
 
+// timeSuffix encodes the time of day at which an image was taken as a short,
+// fixed-width token that sorts lexicographically in chronological order.
+//
+// It works by counting the seconds elapsed since midnight (0..86399) and
+// formatting that number in base 36 (digits 0-9 followed by letters a-z),
+// left-padded with zeros to a fixed width of 4 characters. Because base 36's
+// alphabet is itself in ascending ASCII order and the width is fixed, a larger
+// number always yields a lexicographically larger string: an image taken
+// earlier in the day therefore always sorts before one taken later, without
+// leaking the actual timestamp into the file name.
+func timeSuffix(t time.Time) string {
+	secondsSinceMidnight := t.Hour()*3600 + t.Minute()*60 + t.Second()
+	s := strconv.FormatInt(int64(secondsSinceMidnight), 36)
+	for len(s) < 4 {
+		s = "0" + s
+	}
+	return s
+}
+
 // GenerateNewName according to the pattern (checks for duplicate names, too)
 func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex *sync.Mutex) {
 	mutex.Lock()
@@ -80,33 +100,35 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex 
 
 	path, _ := filepath.Split(i.OriginalName)
 	ext := strings.ToLower(filepath.Ext(i.OriginalName)) // all extensions lowercase for consistency
-	var newName string
+	var datePart string
 
 	switch pattern {
 	case "YYYY-MM-DD":
-		newName = i.Date.Format("2006-01-02")
+		datePart = i.Date.Format("2006-01-02")
 	case "YYYY/MM/DD":
-		newName = i.Date.Format("2006/01/02")
+		datePart = i.Date.Format("2006/01/02")
 	case "YYYY/MM-DD":
-		newName = i.Date.Format("2006/01-02")
+		datePart = i.Date.Format("2006/01-02")
 	case "YYYY/YYYY-MM-DD":
-		newName = fmt.Sprintf("%s/%s", i.Date.Format("2006"), i.Date.Format("2006-01-02"))
+		datePart = fmt.Sprintf("%s/%s", i.Date.Format("2006"), i.Date.Format("2006-01-02"))
 	default:
-		newName = i.Date.Format("2006-01-02")
+		datePart = i.Date.Format("2006-01-02")
 	}
 
-	// have we set this filename before already?
-	if seen, ok := (*newNames)[newName]; ok {
-		paddedSeen := fmt.Sprintf("%04d", seen+1)
-		i.NewName = fmt.Sprintf(
-			"%s%s_%s%s", path, newName, paddedSeen, ext,
-		)
-		(*newNames)[newName]++
+	// The base name encodes the date (from the pattern) plus a time-derived
+	// suffix that keeps same-day images ordered. base sorts chronologically.
+	base := fmt.Sprintf("%s%s_%s", path, datePart, timeSuffix(i.Date))
+
+	// Two images can share the same base only if they were taken within the
+	// same second (EXIF granularity). In that case append an incrementing
+	// counter as a tie-breaker; their relative order within the second is
+	// inherently undefined anyway.
+	if seen, ok := (*newNames)[base]; ok {
+		(*newNames)[base] = seen + 1
+		i.NewName = fmt.Sprintf("%s-%d%s", base, seen+1, ext)
 	} else {
-		i.NewName = fmt.Sprintf(
-			"%s%s_%s%s", path, newName, "0000", ext,
-		)
-		(*newNames)[newName] = 0
+		(*newNames)[base] = 0
+		i.NewName = fmt.Sprintf("%s%s", base, ext)
 	}
 }
 
