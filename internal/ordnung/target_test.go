@@ -124,7 +124,7 @@ func TestGenerateNewName_SequentialAssignmentIsCollisionFree(t *testing.T) {
 }
 
 // TestTimeSuffix_LexicographicOrder verifies the core property:
-// earlier in the day must produce lexicographically smaller suffixes than
+// earlier in the day must produce sorting-smaller suffixes than
 // images taken later, regardless of the order they're processed in.
 func TestTimeSuffix_LexicographicOrder(t *testing.T) {
 	day := func(h, m, s int) time.Time {
@@ -140,11 +140,25 @@ func TestTimeSuffix_LexicographicOrder(t *testing.T) {
 	}
 
 	// Suffixes derived from ascending times must themselves be in strictly
-	// ascending lexicographic order, all at the fixed width of 4 characters.
+	// ascending lexicographic order, all at the fixed width of 5 characters.
 	suffixes := make([]string, len(stamps))
 	for i, ts := range stamps {
 		suffixes[i] = timeSuffix(ts)
-		test.EqOp(t, 4, len(suffixes[i]), test.Sprintf("suffix %q is not 4 chars wide", suffixes[i]))
+		test.EqOp(t, 5, len(suffixes[i]), test.Sprintf("suffix %q is not 5 chars wide", suffixes[i]))
 	}
 	test.AscendingFunc(t, suffixes, func(a, b string) bool { return a < b })
+}
+
+// TestTimeSuffix_AllDecimal guards against reintroducing a base-36 (or any
+// non-decimal) encoding: such tokens have variable-length leading digit runs,
+// which macOS Finder's natural sort would order numerically and thereby invert
+// (e.g. "1abc" before "09zz"). A purely decimal token keeps natural-sort and
+// byte-wise order in agreement.
+func TestTimeSuffix_AllDecimal(t *testing.T) {
+	for h := 0; h < 24; h++ {
+		s := timeSuffix(time.Date(2021, 7, 15, h, 35, 59, 0, time.UTC))
+		for _, r := range s {
+			test.True(t, r >= '0' && r <= '9', test.Sprintf("suffix %q contains a non-decimal rune %q", s, r))
+		}
+	}
 }

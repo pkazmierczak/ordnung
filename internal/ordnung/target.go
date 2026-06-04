@@ -4,28 +4,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
 
 // timeSuffix encodes the time of day at which an image was taken as a short,
-// fixed-width token that sorts lexicographically in chronological order.
+// fixed-width token that sorts in chronological order.
 //
-// It works by counting the seconds elapsed since midnight (0..86399) and
-// formatting that number in base 36 (digits 0-9 followed by letters a-z),
-// left-padded with zeros to a fixed width of 4 characters. Because base 36's
-// alphabet is itself in ascending ASCII order and the width is fixed, a larger
-// number always yields a lexicographically larger string: an image taken
-// earlier in the day therefore always sorts before one taken later, without
-// leaking the actual timestamp into the file name.
+// It counts the seconds elapsed since midnight (0..86399) and formats that as a
+// zero-padded, fixed-width decimal number ("00000".."86399"). A larger number
+// therefore always yields a sorting-greater string, so an image taken earlier
+// in the day always sorts before one taken later.
+//
+// The token is deliberately all-decimal rather than a denser base-36 encoding.
+// macOS Finder (and many file managers) sort "naturally": runs of digits are
+// compared as numbers, not byte by byte. A base-36 token mixes digits and
+// letters, so the length of its leading digit-run varies between values (e.g.
+// "09zz" vs "1abc"), and Finder would compare those runs numerically as 9 vs 1
+// — inverting the order. A fixed-width all-decimal token has a single digit-run
+// of constant width, so natural and byte-wise ordering agree.
 func timeSuffix(t time.Time) string {
 	secondsSinceMidnight := t.Hour()*3600 + t.Minute()*60 + t.Second()
-	s := strconv.FormatInt(int64(secondsSinceMidnight), 36)
-	for len(s) < 4 {
-		s = "0" + s
-	}
-	return s
+	return fmt.Sprintf("%05d", secondsSinceMidnight)
 }
 
 // GenerateNewName computes a collision-free target name for the image.
