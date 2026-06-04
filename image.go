@@ -1,6 +1,7 @@
 package ordnung
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -37,41 +38,54 @@ func (i *Image) ExtractDate() error {
 	}
 	defer f.Close()
 
-	m, err := imagemeta.Parse(f)
+	e, err := imagemeta.Decode(f)
 	if err != nil {
+		// No EXIF block at all: not fatal, fall back to filesystem times.
+		if errors.Is(err, imagemeta.ErrNoExif) {
+			return i.dateFromFile(f.Name(), err)
+		}
+		// Unrecognized image type: nothing we can do, skip it.
+		if errors.Is(err, imagemeta.ErrImageTypeNotFound) {
+			i.Process = false
+			return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
+		}
 		i.Process = false
 		return fmt.Errorf("unable to parse file: %v, skipping", i.OriginalName)
 	}
 
-	if m.ImageType().IsUnknown() {
+	if e.ImageType.IsUnknown() {
 		i.Process = false
 		return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
 	}
 
-	// attempt to access exif metadata
-	e, _ := m.Exif()
-	if e != nil {
-		exifTime, err := e.DateTime(time.Local)
-		if err == nil {
-			i.Date = exifTime
-		}
-	} else {
-		t, err := times.Stat(f.Name())
-		if err != nil {
-			i.Process = false
-			return fmt.Errorf("unable to stat file: %v, skipping", i.OriginalName)
-		}
-		if t.HasBirthTime() {
-			i.Date = t.BirthTime()
-		} else {
-			i.Date = t.ChangeTime()
-		}
-		return fmt.Errorf("error processing exif data for %v: %v, using file creation date instead",
-			i.OriginalName, err,
-		)
+	// Prefer the EXIF capture date (DateTimeOriginal, then CreateDate, then
+	// ModifyDate). If none is present, fall back to the filesystem times.
+	if d := e.SelectedDate(); !d.IsZero() {
+		i.Date = d
+		return nil
 	}
 
-	return nil
+	return i.dateFromFile(f.Name(), errors.New("no EXIF date found"))
+}
+
+// dateFromFile sets i.Date from the filesystem birth (or change) time. It is
+// used as a non-fatal fallback: the image is still processed, but the returned
+// error informs the caller which date source was used. cause describes why the
+// EXIF date was unavailable.
+func (i *Image) dateFromFile(name string, cause error) error {
+	t, err := times.Stat(name)
+	if err != nil {
+		i.Process = false
+		return fmt.Errorf("unable to stat file: %v, skipping", i.OriginalName)
+	}
+	if t.HasBirthTime() {
+		i.Date = t.BirthTime()
+	} else {
+		i.Date = t.ChangeTime()
+	}
+	return fmt.Errorf("error processing exif data for %v: %v, using file creation date instead",
+		i.OriginalName, cause,
+	)
 }
 
 // timeSuffix encodes the time of day at which an image was taken as a short,
@@ -120,16 +134,13 @@ func (i *Image) GenerateNewName(pattern string, newNames *map[string]int, mutex 
 	base := fmt.Sprintf("%s%s_%s", path, datePart, timeSuffix(i.Date))
 
 	// Two images can share the same base only if they were taken within the
-	// same second (EXIF granularity). In that case append an incrementing
-	// counter as a tie-breaker; their relative order within the second is
-	// inherently undefined anyway.
-	if seen, ok := (*newNames)[base]; ok {
-		(*newNames)[base] = seen + 1
-		i.NewName = fmt.Sprintf("%s-%d%s", base, seen+1, ext)
-	} else {
-		(*newNames)[base] = 0
-		i.NewName = fmt.Sprintf("%s%s", base, ext)
-	}
+	// same second (EXIF granularity). Every name gets a zero-padded counter so
+	// that same-second images stay correctly ordered: a bare "base.ext" would
+	// sort *after* "base-01.ext" (since '.' > '-' in ASCII), so the first image
+	// of a group needs its "-00" too. The map returns 0 for an unseen base.
+	seen := (*newNames)[base]
+	i.NewName = fmt.Sprintf("%s-%02d%s", base, seen, ext)
+	(*newNames)[base] = seen + 1
 }
 
 func (i *Image) Rename() error {

@@ -23,21 +23,21 @@ func TestImage_GenerateNewName(t *testing.T) {
 			Image{"sample.jpg", "", d, true},
 			"YYYY-MM-DD",
 			&map[string]int{},
-			fmt.Sprintf("%v_%s.jpg", d.Format("2006-01-02"), timeSuffix(d)),
+			fmt.Sprintf("%v_%s-00.jpg", d.Format("2006-01-02"), timeSuffix(d)),
 		},
 		{
 			"YYYY/MM-DD collision in the same second",
 			Image{"sample.jpg", "", d, true},
 			"YYYY/MM-DD",
-			&map[string]int{fmt.Sprintf("%s_%s", d.Format("2006/01-02"), timeSuffix(d)): 0},
-			fmt.Sprintf("%v_%s-1.jpg", d.Format("2006/01-02"), timeSuffix(d)),
+			&map[string]int{fmt.Sprintf("%s_%s", d.Format("2006/01-02"), timeSuffix(d)): 1},
+			fmt.Sprintf("%v_%s-01.jpg", d.Format("2006/01-02"), timeSuffix(d)),
 		},
 		{
 			"unsupported pattern falls back to YYYY-MM-DD",
 			Image{"sample.jpg", "", d, true},
 			"MM-DD",
 			&map[string]int{},
-			fmt.Sprintf("%v_%s.jpg", d.Format("2006-01-02"), timeSuffix(d)),
+			fmt.Sprintf("%v_%s-00.jpg", d.Format("2006-01-02"), timeSuffix(d)),
 		},
 	}
 	for _, tt := range tests {
