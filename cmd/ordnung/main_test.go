@@ -26,12 +26,11 @@ func find(images []*ordnung.Image, path string) *ordnung.Image {
 	return nil
 }
 
-// TestGetImages_SeparatesLivePhotosFromStandaloneVideos is the regression test
-// for the apply-phase race: a Live Photo .mov must be queued only for deletion
-// (via its still), never also as a standalone rename — otherwise one worker
-// would move it while another deletes it. A genuinely standalone video must
-// still be queued, along with its own sidecar.
-func TestGetImages_SeparatesLivePhotosFromStandaloneVideos(t *testing.T) {
+// TestGetImages_LivePhotoVideoDeletedWhenStillDecodes is the main path: with a
+// decodable still, its Live Photo video is queued for deletion (via the still)
+// and kept out of the rename set, while a genuinely standalone video — and its
+// own sidecar — are queued for renaming.
+func TestGetImages_LivePhotoVideoDeletedWhenStillDecodes(t *testing.T) {
 	dir := t.TempDir()
 
 	// A Live Photo: still + video part sharing a base name, plus the single
@@ -49,25 +48,53 @@ func TestGetImages_SeparatesLivePhotosFromStandaloneVideos(t *testing.T) {
 	touch(t, standalone)
 	touch(t, standaloneXMP)
 
-	images := getImages(dir, false /* keepLive */, true /* includeVideos */)
-
-	// The Live Photo video must not appear as a standalone rename target.
-	test.Nil(t, find(images, liveMov), test.Sprint("live photo video must not be queued for renaming"))
+	images, links := getImages(dir, false /* keepLive */, true /* includeVideos */)
+	// Stills decode successfully (New sets Process=true), so resolve deletes.
+	resolveLivePhotos(links)
 
 	still := find(images, heic)
 	must.NotNil(t, still, must.Sprint("the still should be processed"))
-	test.Eq(t, liveMov, still.LiveVideo, test.Sprint("the still should claim its live video for deletion"))
+	test.Eq(t, liveMov, still.LiveVideo, test.Sprint("the still should delete its live video"))
 	test.Eq(t, heicXMP, still.Sidecar, test.Sprint("the still keeps the shared sidecar"))
 
-	video := find(images, standalone)
-	must.NotNil(t, video, must.Sprint("the standalone video should be processed"))
-	test.Eq(t, "", video.LiveVideo, test.Sprint("a standalone video has no live-photo part to delete"))
-	test.Eq(t, standaloneXMP, video.Sidecar, test.Sprint("a standalone video's own sidecar should be attached"))
+	liveVid := find(images, liveMov)
+	must.NotNil(t, liveVid, must.Sprint("the live video is present as an entry"))
+	test.False(t, liveVid.Process, test.Sprint("but is excluded from the rename set, deleted instead"))
+
+	standaloneVid := find(images, standalone)
+	must.NotNil(t, standaloneVid, must.Sprint("the standalone video should be processed"))
+	test.True(t, standaloneVid.Process)
+	test.Eq(t, "", standaloneVid.LiveVideo)
+	test.Eq(t, standaloneXMP, standaloneVid.Sidecar, test.Sprint("a standalone video's own sidecar should be attached"))
 }
 
-// TestGetImages_KeepLivePhotosRenamesTheVideo verifies that with -keep-live-photos
-// the Live Photo .mov is not deleted but, when -videos is set, is renamed like
-// any other video (and the still no longer claims it for deletion).
+// TestGetImages_LivePhotoVideoRenamedWhenStillFails is the regression test for
+// orphaning: if the still can't be decoded, its video must NOT be deleted (the
+// still never runs) and must instead be renamed like any other video.
+func TestGetImages_LivePhotoVideoRenamedWhenStillFails(t *testing.T) {
+	dir := t.TempDir()
+	heic := filepath.Join(dir, "IMG_1234.heic")
+	liveMov := filepath.Join(dir, "IMG_1234.mov")
+	touch(t, heic)
+	touch(t, liveMov)
+
+	images, links := getImages(dir, false /* keepLive */, true /* includeVideos */)
+
+	// Simulate the still failing to decode (ExtractDate would set Process=false).
+	still := find(images, heic)
+	must.NotNil(t, still)
+	still.Process = false
+	resolveLivePhotos(links)
+
+	test.Eq(t, "", still.LiveVideo, test.Sprint("a failed still must not delete its video"))
+	liveVid := find(images, liveMov)
+	must.NotNil(t, liveVid)
+	test.True(t, liveVid.Process, test.Sprint("the video is renamed, not orphaned, when its still fails"))
+}
+
+// TestGetImages_KeepLivePhotosRenamesTheVideo verifies that with
+// -keep-live-photos no link is created, so the Live Photo .mov is renamed like
+// any other video and the still never claims it for deletion.
 func TestGetImages_KeepLivePhotosRenamesTheVideo(t *testing.T) {
 	dir := t.TempDir()
 	heic := filepath.Join(dir, "IMG_1234.heic")
@@ -75,19 +102,23 @@ func TestGetImages_KeepLivePhotosRenamesTheVideo(t *testing.T) {
 	touch(t, heic)
 	touch(t, liveMov)
 
-	images := getImages(dir, true /* keepLive */, true /* includeVideos */)
+	images, links := getImages(dir, true /* keepLive */, true /* includeVideos */)
+	test.SliceEmpty(t, links, test.Sprint("keepLive should create no deletion links"))
+	resolveLivePhotos(links)
 
 	still := find(images, heic)
-	must.NotNil(t, still, must.Sprint("the still should be processed"))
-	test.Eq(t, "", still.LiveVideo, test.Sprint("with keepLive the still must not claim the video for deletion"))
+	must.NotNil(t, still)
+	test.Eq(t, "", still.LiveVideo, test.Sprint("with keepLive the still must not claim the video"))
 
 	video := find(images, liveMov)
 	must.NotNil(t, video, must.Sprint("with keepLive+videos the kept video should be renamed"))
+	test.True(t, video.Process)
 }
 
-// TestGetImages_VideosDisabledLeavesVideosAlone confirms that without -videos no
-// video is queued for renaming, while Live Photo deletion still happens.
-func TestGetImages_VideosDisabledLeavesVideosAlone(t *testing.T) {
+// TestGetImages_VideosDisabledStillDeletesLivePhoto confirms that without
+// -videos no video is queued for renaming, while Live Photo deletion still
+// happens via the still.
+func TestGetImages_VideosDisabledStillDeletesLivePhoto(t *testing.T) {
 	dir := t.TempDir()
 	heic := filepath.Join(dir, "IMG_1234.heic")
 	liveMov := filepath.Join(dir, "IMG_1234.mov")
@@ -96,7 +127,8 @@ func TestGetImages_VideosDisabledLeavesVideosAlone(t *testing.T) {
 	touch(t, liveMov)
 	touch(t, standalone)
 
-	images := getImages(dir, false /* keepLive */, false /* includeVideos */)
+	images, links := getImages(dir, false /* keepLive */, false /* includeVideos */)
+	resolveLivePhotos(links)
 
 	test.Nil(t, find(images, liveMov), test.Sprint("no video should be queued for renaming"))
 	test.Nil(t, find(images, standalone), test.Sprint("no video should be queued for renaming"))

@@ -30,25 +30,28 @@ var (
 		"Also rename video files (.mov/.mp4/.m4v) using their embedded creation date.")
 )
 
-// getImages scans a directory (recursively) and prepares a list of files to
-// process. When keepLive is false, each still is also probed for an Apple Live
-// Photo .mov part sharing its base name, which is marked for deletion. When
-// includeVideos is true, standalone videos are added as renameable files too
-// (each with any XMP sidecar of its own) — except a .mov that a still has
-// claimed as its Live Photo part, so a still's video is never both renamed and
-// deleted.
+// liveLink couples a still with its Apple Live Photo video part. The coupling
+// is resolved only after capture dates have been read (see resolveLivePhotos),
+// so a still that turns out to be undecodable never orphans its video.
+type liveLink struct {
+	still   *ordnung.Image
+	movPath string         // the video part, deleted via the still's Rename
+	movImg  *ordnung.Image // the video's own rename entry, or nil when videos aren't being renamed
+}
+
+// getImages scans a directory (recursively) and prepares the files to process.
+// Stills are collected with any XMP sidecar; when includeVideos is true, videos
+// are collected too (each with its own sidecar). When keepLive is false, each
+// still is coupled with its Live Photo .mov part via a liveLink for later
+// resolution.
 //
-// Claimed parts are matched by file identity (os.SameFile), not by path string:
-// FindLiveVideo probes ".mov" before ".MOV", so on a case-insensitive
-// filesystem it reports the lowercase candidate while WalkDir yields the real
-// name. A string comparison would miss that, letting the Live Photo video into
-// the rename set where it would race its own deletion during apply.
-func getImages(directory string, keepLive, includeVideos bool) []*ordnung.Image {
-	stills := make([]*ordnung.Image, 0)
-	videoPaths := make([]string, 0)
-	// FileInfos of the .mov parts a still has claimed for deletion, used to
-	// exclude them from standalone video processing by identity.
-	var claimed []os.FileInfo
+// Crucially, a Live Photo .mov is NOT excluded here. Whether it is deleted (its
+// still decoded) or renamed like any other video (its still failed) can only be
+// known after extraction, so the decision is deferred to resolveLivePhotos.
+func getImages(directory string, keepLive, includeVideos bool) ([]*ordnung.Image, []liveLink) {
+	var stills []*ordnung.Image
+	var videos []*ordnung.Image
+	var videoInfos []os.FileInfo // parallel to videos, for identity matching
 
 	if err := filepath.WalkDir(directory, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -66,58 +69,70 @@ func getImages(directory string, keepLive, includeVideos bool) []*ordnung.Image 
 			// Attach an XMP sidecar (same base name) if one sits beside it, so it
 			// gets renamed in lockstep with the image.
 			img.Sidecar = ordnung.FindSidecar(path)
-			// Unless we're keeping Live Photos, attach a same-named .mov video
-			// part so it gets deleted when the still is processed.
-			if !keepLive {
-				if v := ordnung.FindLiveVideo(path); v != "" {
-					img.LiveVideo = v
-					if fi, err := os.Lstat(v); err == nil {
-						claimed = append(claimed, fi)
-					}
-				}
-			}
 			stills = append(stills, img)
 		case includeVideos && ordnung.IsVideo(d.Name()):
-			videoPaths = append(videoPaths, path)
+			vid := ordnung.New(path)
+			// A standalone video may carry its own XMP sidecar; rename it in
+			// lockstep, exactly as for stills.
+			vid.Sidecar = ordnung.FindSidecar(path)
+			videos = append(videos, vid)
+			fi, _ := os.Lstat(path)
+			videoInfos = append(videoInfos, fi)
 		}
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	images := stills
-	for _, v := range videoPaths {
-		// Skip a video that a still has claimed as a Live Photo part to delete.
-		if claimedForDeletion(v, claimed) {
-			continue
+	var links []liveLink
+	if !keepLive {
+		for _, s := range stills {
+			v := ordnung.FindLiveVideo(s.OriginalName)
+			if v == "" {
+				continue
+			}
+			links = append(links, liveLink{
+				still:   s,
+				movPath: v,
+				movImg:  matchVideo(v, videos, videoInfos),
+			})
 		}
-		vid := ordnung.New(v)
-		// A standalone video may carry its own XMP sidecar; rename it in
-		// lockstep, exactly as for stills.
-		vid.Sidecar = ordnung.FindSidecar(v)
-		images = append(images, vid)
 	}
 
-	return images
+	return append(stills, videos...), links
 }
 
-// claimedForDeletion reports whether path refers to the same file as any of the
-// claimed Live Photo video parts. It compares by identity (os.SameFile) so a
-// case-only filename difference on a case-insensitive filesystem still matches.
-func claimedForDeletion(path string, claimed []os.FileInfo) bool {
-	if len(claimed) == 0 {
-		return false
-	}
-	info, err := os.Lstat(path)
+// matchVideo returns the renameable video entry that refers to the same file as
+// path, or nil. It compares by identity (os.SameFile) so a ".mov" vs ".MOV"
+// difference on a case-insensitive filesystem still matches.
+func matchVideo(path string, videos []*ordnung.Image, infos []os.FileInfo) *ordnung.Image {
+	target, err := os.Lstat(path)
 	if err != nil {
-		return false
+		return nil
 	}
-	for _, c := range claimed {
-		if os.SameFile(info, c) {
-			return true
+	for idx, info := range infos {
+		if info != nil && os.SameFile(info, target) {
+			return videos[idx]
 		}
 	}
-	return false
+	return nil
+}
+
+// resolveLivePhotos decides, now that capture dates have been read, what becomes
+// of each Live Photo video part. When its still was successfully processed the
+// video is deleted alongside the still (and kept out of the rename set); when
+// the still could not be processed the video is left untouched, so it is renamed
+// like any other video rather than orphaned.
+func resolveLivePhotos(links []liveLink) {
+	for _, link := range links {
+		if !link.still.Process {
+			continue
+		}
+		link.still.LiveVideo = link.movPath
+		if link.movImg != nil {
+			link.movImg.Process = false
+		}
+	}
 }
 
 // parallelDo runs fn over every image using the given number of workers. It
@@ -232,10 +247,14 @@ Options:
 		os.Exit(1)
 	}
 
-	imageFiles := getImages(arg[0], *keepLivePhotos, *includeVideos)
+	imageFiles, liveLinks := getImages(arg[0], *keepLivePhotos, *includeVideos)
 
 	// Phase 1: extract capture dates (parallel, the slow part).
 	extractDates(imageFiles, *numWorkers, !*dryRun)
+
+	// Phase 1b: now that dates are known, decide each Live Photo video's fate
+	// (delete with its still, or rename it if the still couldn't be processed).
+	resolveLivePhotos(liveLinks)
 
 	// Phase 2: assign target names deterministically (single-threaded).
 	toRename := assignNames(imageFiles, *pattern)

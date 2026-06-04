@@ -123,6 +123,39 @@ func TestGenerateNewName_SequentialAssignmentIsCollisionFree(t *testing.T) {
 	test.NotEq(t, imgA.NewName, imgB.NewName, test.Sprint("two images were assigned the same name"))
 }
 
+// TestGenerateNewName_SidecarTargetsDoNotCollide guards the bug where two files
+// that differ only in extension but share a capture second (e.g. a Live Photo's
+// HEIC and MOV, or an unrelated still and video) were handed the same counter
+// and therefore a colliding "base-NN.xmp" sidecar target. The image names alone
+// don't clash (different extensions), so the sidecar slot must be reserved too.
+func TestGenerateNewName_SidecarTargetsDoNotCollide(t *testing.T) {
+	d := time.Date(2021, 7, 15, 8, 15, 30, 0, time.UTC)
+	dir := t.TempDir()
+
+	heic := filepath.Join(dir, "IMG_1234.heic")
+	heicXMP := filepath.Join(dir, "IMG_1234.xmp")
+	mov := filepath.Join(dir, "VID_5678.mov")
+	movXMP := filepath.Join(dir, "VID_5678.xmp")
+	for _, p := range []string{heic, heicXMP, mov, movXMP} {
+		must.NoError(t, os.WriteFile(p, []byte("x"), 0o644))
+	}
+
+	reserved := map[string]struct{}{}
+	a := &Image{OriginalName: heic, NewName: heic, Date: d, Process: true, Sidecar: heicXMP}
+	b := &Image{OriginalName: mov, NewName: mov, Date: d, Process: true, Sidecar: movXMP}
+	a.GenerateNewName("YYYY-MM-DD", reserved)
+	b.GenerateNewName("YYYY-MM-DD", reserved)
+
+	suffix := timeSuffix(d)
+	test.Eq(t, filepath.Join(dir, "2021-07-15_"+suffix+"-00.heic"), a.NewName)
+	test.Eq(t, filepath.Join(dir, "2021-07-15_"+suffix+"-00.xmp"), a.SidecarNewName)
+	// b must be bumped to -01 because -00.xmp is already reserved by a.
+	test.Eq(t, filepath.Join(dir, "2021-07-15_"+suffix+"-01.mov"), b.NewName)
+	test.Eq(t, filepath.Join(dir, "2021-07-15_"+suffix+"-01.xmp"), b.SidecarNewName)
+
+	test.NotEq(t, a.SidecarNewName, b.SidecarNewName, test.Sprint("sidecar targets must be unique"))
+}
+
 // TestTimeSuffix_LexicographicOrder verifies the core property:
 // earlier in the day must produce sorting-smaller suffixes than
 // images taken later, regardless of the order they're processed in.

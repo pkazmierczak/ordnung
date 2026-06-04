@@ -72,37 +72,60 @@ func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}) {
 	// suffix that keeps same-day images ordered. base sorts chronologically.
 	base := fmt.Sprintf("%s%s_%s", dir, datePart, timeSuffix(i.Date))
 
-	// Identify the source on disk so we can recognize when a candidate name
+	// Identify the sources on disk so we can recognize when a candidate name
 	// already refers to this very file (the idempotent / case-only-rename case).
 	srcInfo, _ := os.Lstat(i.OriginalName)
+	var sidecarExt string
+	var sidecarSrcInfo os.FileInfo
+	if i.Sidecar != "" {
+		sidecarExt = strings.ToLower(filepath.Ext(i.Sidecar))
+		sidecarSrcInfo, _ = os.Lstat(i.Sidecar)
+	}
 
-	// Pick the lowest zero-padded counter that is free. Same-second images get
-	// consecutive counters; the fixed-width "-NN" keeps them lexicographically
-	// ordered (a bare "base.ext" would otherwise sort after "base-01.ext").
+	// Pick the lowest zero-padded counter at which both the image name and (if
+	// present) its sidecar name are free. Same-second images get consecutive
+	// counters; the fixed-width "-NN" keeps them lexicographically ordered (a
+	// bare "base.ext" would otherwise sort after "base-01.ext").
+	//
+	// The sidecar must be checked too, not just the image: two files that differ
+	// only in extension (e.g. a Live Photo's "IMG.heic" and "IMG.mov", or a still
+	// and a video taken in the same second) would otherwise be handed the same
+	// counter and collide on a shared "base-NN.xmp" target, since the image names
+	// themselves don't clash. Reserving both keeps every target unique.
 	for n := 0; ; n++ {
 		candidate := fmt.Sprintf("%s-%02d%s", base, n, ext)
-
 		if _, taken := reserved[candidate]; taken {
 			continue
 		}
 
+		var sidecarCandidate string
+		if i.Sidecar != "" {
+			sidecarCandidate = strings.TrimSuffix(candidate, ext) + sidecarExt
+			if _, taken := reserved[sidecarCandidate]; taken {
+				continue
+			}
+		}
+
+		// A file already occupies a target name. Only claim it if it is that
+		// target's own source; otherwise move on so we never overwrite a file.
 		if dstInfo, err := os.Lstat(candidate); err == nil {
-			// A file already occupies this name. Only claim it if it is the
-			// source itself; otherwise move on so we never overwrite a photo.
 			if srcInfo == nil || !os.SameFile(srcInfo, dstInfo) {
 				continue
+			}
+		}
+		if sidecarCandidate != "" {
+			if dstInfo, err := os.Lstat(sidecarCandidate); err == nil {
+				if sidecarSrcInfo == nil || !os.SameFile(sidecarSrcInfo, dstInfo) {
+					continue
+				}
 			}
 		}
 
 		reserved[candidate] = struct{}{}
 		i.NewName = candidate
-		if i.Sidecar != "" {
-			// The sidecar mirrors the image: same target base and counter, but
-			// keeps its own (lowercased) extension. Reserving the image slot is
-			// enough to keep sidecars of different images apart, since distinct
-			// images get distinct counters.
-			sidecarExt := strings.ToLower(filepath.Ext(i.Sidecar))
-			i.SidecarNewName = strings.TrimSuffix(candidate, ext) + sidecarExt
+		if sidecarCandidate != "" {
+			reserved[sidecarCandidate] = struct{}{}
+			i.SidecarNewName = sidecarCandidate
 		}
 		return
 	}
