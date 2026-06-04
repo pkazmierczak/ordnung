@@ -56,6 +56,8 @@ func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}) {
 		datePart = i.Date.Format("2006/01-02")
 	case "YYYY/YYYY-MM-DD":
 		datePart = fmt.Sprintf("%s/%s", i.Date.Format("2006"), i.Date.Format("2006-01-02"))
+	case "YYYY/MM/YYYY-MM-DD":
+		datePart = fmt.Sprintf("%s/%s/%s", i.Date.Format("2006"), i.Date.Format("01"), i.Date.Format("2006-01-02"))
 	default:
 		datePart = i.Date.Format("2006-01-02")
 	}

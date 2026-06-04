@@ -22,6 +22,7 @@ var (
 	pattern    = flag.String("pattern", "YYYY-MM-DD", `Renaming pattern, can be one of the following:
 - YYYY-MM-DD
 - YYYY/MM/DD
+- YYYY/MM/YYYY-MM-DD
 - YYYY/MM-DD`)
 	loglvl = flag.String("log-level", "info", "The log level")
 )
