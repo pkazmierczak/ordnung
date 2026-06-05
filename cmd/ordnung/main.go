@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -28,6 +29,8 @@ var (
 		"Keep Apple Live Photo .mov parts? When false (the default), a .mov is deleted if a same-named HEIC or JPG still sits beside it.")
 	includeVideos = flag.Bool("videos", false,
 		"Also rename video files (.mov/.mp4/.m4v) using their embedded creation date.")
+	assumeYes = flag.Bool("yes", false,
+		"Skip the confirmation prompt shown after a scan that reported problems, and proceed anyway.")
 )
 
 // liveLink couples a still with its Apple Live Photo video part. The coupling
@@ -162,8 +165,11 @@ func parallelDo(images []*ordnung.Image, workers int, fn func(*ordnung.Image)) {
 }
 
 // extractDates reads the capture date of every image. This is the expensive,
-// EXIF-decoding stage, so it runs concurrently.
-func extractDates(images []*ordnung.Image, workers int, showBar bool) {
+// EXIF-decoding stage, so it runs concurrently. Problems are collected and
+// returned (classified as *ordnung.ExtractError) rather than logged inline, so
+// the progress bar stays readable and the caller can surface a single grouped
+// report once the scan is done.
+func extractDates(images []*ordnung.Image, workers int, showBar bool) []*ordnung.ExtractError {
 	var bar *progressbar.ProgressBar
 	if showBar {
 		bar = progressbar.Default(int64(len(images)), "reading metadata")
@@ -171,14 +177,28 @@ func extractDates(images []*ordnung.Image, workers int, showBar bool) {
 		log.Infof("reading metadata from %d files", len(images))
 	}
 
+	var (
+		mu     sync.Mutex
+		issues []*ordnung.ExtractError
+	)
 	parallelDo(images, workers, func(img *ordnung.Image) {
 		if err := img.ExtractDate(); err != nil {
-			log.Warn(err)
+			var ee *ordnung.ExtractError
+			if errors.As(err, &ee) {
+				mu.Lock()
+				issues = append(issues, ee)
+				mu.Unlock()
+			} else {
+				// Defensive: ExtractDate classifies every failure, but never
+				// silently drop an unexpected one.
+				log.Warn(err)
+			}
 		}
 		if bar != nil {
 			bar.Add(1)
 		}
 	})
+	return issues
 }
 
 // assignNames computes the target name for every processable image. It runs
@@ -249,8 +269,10 @@ Options:
 
 	imageFiles, liveLinks := getImages(arg[0], *keepLivePhotos, *includeVideos)
 
-	// Phase 1: extract capture dates (parallel, the slow part).
-	extractDates(imageFiles, *numWorkers, !*dryRun)
+	// Phase 1: extract capture dates (parallel, the slow part). Problems are
+	// collected rather than logged inline so the progress bar stays readable;
+	// they're surfaced together as a report once the scan finishes.
+	issues := extractDates(imageFiles, *numWorkers, !*dryRun)
 
 	// Phase 1b: now that dates are known, decide each Live Photo video's fate
 	// (delete with its still, or rename it if the still couldn't be processed).
@@ -258,6 +280,17 @@ Options:
 
 	// Phase 2: assign target names deterministically (single-threaded).
 	toRename := assignNames(imageFiles, *pattern)
+
+	// Surface everything the scan flagged as one grouped report, instead of a
+	// stream of warnings interleaved with the progress bar.
+	if len(issues) > 0 {
+		reportIssues(os.Stderr, issues)
+	}
+
+	if len(toRename) == 0 {
+		fmt.Fprintln(os.Stderr, "Nothing to rename.")
+		return
+	}
 
 	// Phase 3: report the plan (dry run) or apply it (parallel).
 	if *dryRun {
@@ -272,5 +305,17 @@ Options:
 		}
 		return
 	}
+
+	// A real run that turned up problems pauses for confirmation so the user can
+	// review the report above before anything is renamed. The prompt is skipped
+	// with -yes, and skipped when stdin isn't a terminal (scripts, CI), so
+	// non-interactive use keeps working as before.
+	if len(issues) > 0 && !*assumeYes && stdinIsInteractive() {
+		if !confirmProceed(os.Stdin, os.Stderr, fmt.Sprintf("Proceed with renaming %d file(s)?", len(toRename))) {
+			fmt.Fprintln(os.Stderr, "Aborted; no files were changed.")
+			return
+		}
+	}
+
 	applyRenames(toRename, *numWorkers)
 }

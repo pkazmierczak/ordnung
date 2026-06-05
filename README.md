@@ -18,6 +18,18 @@ Photo down to its still frame. Pass `-keep-live-photos` to keep the video
 instead (it is left untouched, or renamed alongside other videos if `-videos`
 is also set).
 
+After the metadata scan, if any files could not be read cleanly, `ordnung`
+prints a single grouped report instead of warnings scrolling past the progress
+bar: which files are missing capture metadata (and so will be renamed using
+their filesystem creation date), and which were skipped (unreadable,
+unsupported, or timed out). Before a real run renames anything, it then asks for
+confirmation so you can review that report first. The prompt is skipped when
+standard input isn't a terminal (so scripts and CI keep working), or when you
+pass `-yes` to proceed without asking.
+
+Reading a file's metadata is bounded by a per-file timeout (10s), so a single
+unreadable file or an unresponsive filesystem can't hang the whole run.
+
 ```
 $ ./ordnung -h
 ```
@@ -45,11 +57,14 @@ to put the binary in your `/usr/local/bin`.
 The code is organized as a standard Go CLI:
 
 - `cmd/ordnung` — the command-line entry point (flag parsing, the scan ->
-  extract -> assign -> rename pipeline).
+  extract -> assign -> rename pipeline, and the post-scan report and
+  confirmation prompt in `review.go`).
 - `internal/ordnung` — the core library: the `Image` model and EXIF date
   extraction (`image.go`), video creation-date extraction (`video.go`),
   target-name generation (`target.go`), and the on-disk rename (`rename.go`),
-  each with a matching `_test.go`.
+  each with a matching `_test.go`. A per-operation IO timeout helper
+  (`timeout.go`) bounds every filesystem call, and `extracterror.go` classifies
+  why a file's date could not be read so the CLI can group it in the report.
 - `internal/version` — build metadata injected at link time by the `Makefile`.
 
 Run the checks with:
