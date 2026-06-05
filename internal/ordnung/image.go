@@ -4,8 +4,8 @@
 package ordnung
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -69,17 +69,7 @@ func New(name string) *Image {
 // extension casings are probed so the lookup works on case-sensitive
 // filesystems too.
 func FindSidecar(imagePath string) string {
-	base := strings.TrimSuffix(imagePath, filepath.Ext(imagePath))
-	for _, ext := range []string{".xmp", ".XMP"} {
-		candidate := base + ext
-		if candidate == imagePath {
-			continue
-		}
-		if info, err := os.Lstat(candidate); err == nil && !info.IsDir() {
-			return candidate
-		}
-	}
-	return ""
+	return findSibling(imagePath, []string{".xmp", ".XMP"})
 }
 
 // FindLiveVideo returns the path to an Apple "Live Photo" video part that
@@ -89,42 +79,99 @@ func FindSidecar(imagePath string) string {
 // can be removed. Both extension casings are probed so the lookup works on
 // case-sensitive filesystems too.
 func FindLiveVideo(imagePath string) string {
-	base := strings.TrimSuffix(imagePath, filepath.Ext(imagePath))
-	for _, ext := range []string{".mov", ".MOV"} {
-		candidate := base + ext
-		if candidate == imagePath {
-			continue
+	return findSibling(imagePath, []string{".mov", ".MOV"})
+}
+
+// findSibling returns the path of a file that shares imagePath's base name but
+// uses one of exts (probed in order), or "" if none exists. The stats are
+// bounded by DefaultIOTimeout: a lookup that cannot complete in time degrades
+// to "" — the same, already-handled outcome as a genuine absence — so a stuck
+// stat on a flaky filesystem can't wedge the scan.
+func findSibling(imagePath string, exts []string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultIOTimeout)
+	defer cancel()
+
+	found, err := withTimeout(ctx, func() (string, error) {
+		base := strings.TrimSuffix(imagePath, filepath.Ext(imagePath))
+		for _, ext := range exts {
+			candidate := base + ext
+			if candidate == imagePath {
+				continue
+			}
+			if info, err := os.Lstat(candidate); err == nil && !info.IsDir() {
+				return candidate, nil
+			}
 		}
-		if info, err := os.Lstat(candidate); err == nil && !info.IsDir() {
-			return candidate
-		}
+		return "", nil
+	})
+	if err != nil {
+		return ""
 	}
-	return ""
+	return found
 }
 
 // ExtractDate extracts the capture date from the file, falling back to the file
 // creation date if it cannot find one. Stills are read via EXIF; videos are
 // read from their QuickTime/ISO-BMFF metadata (see extractVideoDate).
+//
+// The read is bounded by DefaultIOTimeout: a file that cannot be read in time —
+// a corrupt image, an unresponsive mount — is skipped (Process becomes false)
+// rather than hanging the run. Use ExtractDateContext to supply your own
+// deadline.
 func (i *Image) ExtractDate() error {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultIOTimeout)
+	defer cancel()
+	return i.ExtractDateContext(ctx)
+}
+
+// ExtractDateContext is ExtractDate with a caller-supplied context governing the
+// underlying IO. If ctx is cancelled or its deadline passes before the metadata
+// has been read, the image is marked unprocessable and a timeout error is
+// returned.
+func (i *Image) ExtractDateContext(ctx context.Context) error {
+	// Read into a snapshot taken before the worker starts. If the read overruns
+	// ctx and its goroutine is abandoned, a late finish then writes only to the
+	// snapshot and can't race the caller's later use of i. The result is
+	// committed to i below, and only when the read beat its deadline.
+	snapshot := *i
+	res, err := withTimeout(ctx, func() (Image, error) {
+		e := snapshot.extractDate()
+		return snapshot, e
+	})
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		i.Process = false
+		return &ExtractError{Kind: TimedOut, Path: i.OriginalName, cause: err}
+	}
+
+	i.Date = res.Date
+	i.Process = res.Process
+	return err
+}
+
+// extractDate performs the actual metadata read — EXIF for stills, QuickTime/
+// ISO-BMFF for videos — setting i.Date and i.Process. It is the blocking worker
+// ExtractDateContext runs under a deadline.
+func (i *Image) extractDate() error {
 	if IsVideo(i.OriginalName) {
 		return i.extractVideoDate()
 	}
 
 	f, err := os.Open(i.OriginalName)
 	if err != nil {
-		return err
+		i.Process = false
+		return &ExtractError{Kind: Unreadable, Path: i.OriginalName, cause: err}
 	}
 	defer f.Close()
 
 	m, err := imagemeta.Parse(f)
 	if err != nil {
 		i.Process = false
-		return fmt.Errorf("unable to parse file: %v, skipping", i.OriginalName)
+		return &ExtractError{Kind: Unsupported, Path: i.OriginalName, cause: err}
 	}
 
 	if m.ImageType().IsUnknown() {
 		i.Process = false
-		return fmt.Errorf("unknown file type: %v, skipping", i.OriginalName)
+		return &ExtractError{Kind: Unsupported, Path: i.OriginalName, cause: errors.New("unknown file type")}
 	}
 
 	// Prefer the EXIF capture date. Fall back to filesystem times if the image
@@ -146,20 +193,18 @@ func (i *Image) ExtractDate() error {
 
 // dateFromFile sets i.Date from the filesystem birth (or change) time. It is
 // used as a non-fatal fallback: the image is still processed, but the returned
-// error informs the caller which date source was used. cause describes why the
-// EXIF date was unavailable.
+// error (an *ExtractError of kind MissingMetadata) records which date source was
+// used. cause describes why the EXIF/embedded date was unavailable.
 func (i *Image) dateFromFile(name string, cause error) error {
 	t, err := times.Stat(name)
 	if err != nil {
 		i.Process = false
-		return fmt.Errorf("unable to stat file: %v, skipping", i.OriginalName)
+		return &ExtractError{Kind: Unreadable, Path: i.OriginalName, cause: err}
 	}
 	if t.HasBirthTime() {
 		i.Date = t.BirthTime()
 	} else {
 		i.Date = t.ChangeTime()
 	}
-	return fmt.Errorf("error processing exif data for %v: %v, using file creation date instead",
-		i.OriginalName, cause,
-	)
+	return &ExtractError{Kind: MissingMetadata, Path: i.OriginalName, cause: cause}
 }

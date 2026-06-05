@@ -1,6 +1,8 @@
 package ordnung
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +14,32 @@ import (
 // no-op when the file is already correctly named, refuses to overwrite a
 // different file, and creates any destination subdirectories required by the
 // pattern.
+//
+// The moves are bounded by DefaultIOTimeout so an unresponsive filesystem can't
+// hang the run on a single file. Use RenameContext to supply your own deadline.
 func (i *Image) Rename() error {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultIOTimeout)
+	defer cancel()
+	return i.RenameContext(ctx)
+}
+
+// RenameContext is Rename with a caller-supplied context governing the moves. A
+// move that has not completed when ctx is cancelled or times out is abandoned
+// and a timeout error is returned; note that, because the underlying os.Rename
+// can't itself be cancelled, an abandoned move may still complete in the
+// background.
+func (i *Image) RenameContext(ctx context.Context) error {
+	err := withTimeoutErr(ctx, i.renameFiles)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("timed out renaming %v: %w", i.OriginalName, err)
+	}
+	return err
+}
+
+// renameFiles performs the image move, the optional sidecar move, and the
+// optional Live Photo removal. It is the blocking worker RenameContext runs
+// under a deadline.
+func (i *Image) renameFiles() error {
 	if err := moveFile(i.OriginalName, i.NewName); err != nil {
 		return err
 	}

@@ -3,7 +3,6 @@ package ordnung
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"time"
@@ -21,14 +20,15 @@ var quickTimeEpoch = time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
 func (i *Image) extractVideoDate() error {
 	f, err := os.Open(i.OriginalName)
 	if err != nil {
-		return err
+		i.Process = false
+		return &ExtractError{Kind: Unreadable, Path: i.OriginalName, cause: err}
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
 		i.Process = false
-		return fmt.Errorf("unable to stat file: %v, skipping", i.OriginalName)
+		return &ExtractError{Kind: Unreadable, Path: i.OriginalName, cause: err}
 	}
 
 	t, err := videoCreationTime(f, info.Size())
