@@ -100,6 +100,29 @@ func TestReportRenameFailures(t *testing.T) {
 	test.True(t, aAt >= 0 && bAt > aAt, test.Sprint("failures should be sorted by source path"))
 }
 
+// reportWalkWarnings lists every entry the walk couldn't read, sorted by path,
+// with its cause appended.
+func TestReportWalkWarnings(t *testing.T) {
+	warnings := []walkWarning{
+		{path: "/photos/locked", err: errors.New("permission denied")},
+		{path: "/photos/gone.jpg", err: errors.New("no such file or directory")},
+	}
+	var buf bytes.Buffer
+	reportWalkWarnings(&buf, warnings)
+	out := buf.String()
+
+	test.True(t, strings.Contains(out, "Could not read 2 item(s) while scanning:"),
+		test.Sprintf("missing header:\n%s", out))
+	test.True(t, strings.Contains(out, "/photos/gone.jpg (no such file or directory)"),
+		test.Sprintf("missing entry:\n%s", out))
+	test.True(t, strings.Contains(out, "/photos/locked (permission denied)"),
+		test.Sprintf("missing entry:\n%s", out))
+
+	goneAt := strings.Index(out, "/photos/gone.jpg")
+	lockedAt := strings.Index(out, "/photos/locked")
+	test.True(t, goneAt >= 0 && lockedAt > goneAt, test.Sprint("warnings should be sorted by path"))
+}
+
 // countSkipped counts only the fatal kinds; the missing-metadata fallback is
 // processed, not skipped.
 func TestCountSkipped(t *testing.T) {

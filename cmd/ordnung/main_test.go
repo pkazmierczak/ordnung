@@ -5,11 +5,21 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/pterm/pterm"
 	"github.com/shoenig/test"
 	"github.com/shoenig/test/must"
 
 	"github.com/pkazmierczak/ordnung/internal/ordnung"
 )
+
+// TestMain disables pterm styling for the whole package so the report builders
+// (reportIssues, reportRenameFailures, reportWalkWarnings) emit plain,
+// deterministic text. pterm forces color on by default — even off a TTY — which
+// would otherwise wrap styled headers in ANSI escapes.
+func TestMain(m *testing.M) {
+	pterm.DisableStyling()
+	os.Exit(m.Run())
+}
 
 func touch(t *testing.T, path string) {
 	t.Helper()
@@ -48,7 +58,7 @@ func TestGetImages_LivePhotoVideoDeletedWhenStillDecodes(t *testing.T) {
 	touch(t, standalone)
 	touch(t, standaloneXMP)
 
-	images, links := getImages(dir, false /* keepLive */, true /* includeVideos */)
+	images, links, _ := getImages(dir, false /* keepLive */, true /* includeVideos */)
 	// Stills decode successfully (New sets Process=true), so resolve deletes.
 	resolveLivePhotos(links)
 
@@ -78,7 +88,7 @@ func TestGetImages_LivePhotoVideoRenamedWhenStillFails(t *testing.T) {
 	touch(t, heic)
 	touch(t, liveMov)
 
-	images, links := getImages(dir, false /* keepLive */, true /* includeVideos */)
+	images, links, _ := getImages(dir, false /* keepLive */, true /* includeVideos */)
 
 	// Simulate the still failing to decode (ExtractDate would set Process=false).
 	still := find(images, heic)
@@ -102,7 +112,7 @@ func TestGetImages_KeepLivePhotosRenamesTheVideo(t *testing.T) {
 	touch(t, heic)
 	touch(t, liveMov)
 
-	images, links := getImages(dir, true /* keepLive */, true /* includeVideos */)
+	images, links, _ := getImages(dir, true /* keepLive */, true /* includeVideos */)
 	test.SliceEmpty(t, links, test.Sprint("keepLive should create no deletion links"))
 	resolveLivePhotos(links)
 
@@ -127,7 +137,7 @@ func TestGetImages_VideosDisabledStillDeletesLivePhoto(t *testing.T) {
 	touch(t, liveMov)
 	touch(t, standalone)
 
-	images, links := getImages(dir, false /* keepLive */, false /* includeVideos */)
+	images, links, _ := getImages(dir, false /* keepLive */, false /* includeVideos */)
 	resolveLivePhotos(links)
 
 	test.Nil(t, find(images, liveMov), test.Sprint("no video should be queued for renaming"))

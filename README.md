@@ -18,6 +18,14 @@ Photo down to its still frame. Pass `-keep-live-photos` to keep the video
 instead (it is left untouched, or renamed alongside other videos if `-videos`
 is also set).
 
+While it works, `ordnung` reports progress live on a single, continuously
+updating line — a spinner while it discovers files, then a progress bar naming
+the file whose metadata is being read (and, on a real run, the file being
+renamed) — rather than scrolling thousands of log lines. When standard error
+isn't a terminal (a pipe, a redirect, CI), it falls back to plain status lines
+instead, and the machine-readable dry-run plan always goes to standard output
+untouched, so `ordnung dir > plan.txt` stays clean and parseable.
+
 After the metadata scan, if any files could not be read cleanly, `ordnung`
 prints a single grouped report instead of warnings scrolling past the progress
 bar: which files are missing capture metadata (and so will be renamed using
@@ -64,8 +72,9 @@ to put the binary in your `/usr/local/bin`.
 The code is organized as a standard Go CLI:
 
 - `cmd/ordnung` — the command-line entry point (flag parsing, the scan ->
-  extract -> assign -> rename pipeline, and the post-scan report and
-  confirmation prompt in `review.go`).
+  extract -> assign -> rename pipeline, the post-scan report and confirmation
+  prompt in `review.go`, and the live progress UI — spinner, progress bars, and
+  colored status — in `ui.go`).
 - `internal/ordnung` — the core library: the `Image` model and EXIF date
   extraction (`image.go`), video creation-date extraction (`video.go`),
   target-name generation (`target.go`), and the on-disk rename (`rename.go`),
@@ -73,6 +82,11 @@ The code is organized as a standard Go CLI:
   (`timeout.go`) bounds every filesystem call, and `extracterror.go` classifies
   why a file's date could not be read so the CLI can group it in the report.
 - `internal/version` — build metadata injected at link time by the `Makefile`.
+
+The interactive output (the discovery spinner, the metadata/rename progress
+bars, and the colored status lines) is built on
+[pterm](https://github.com/pterm/pterm). It auto-degrades to plain text when
+standard error isn't a terminal, so piped and CI output stays readable.
 
 Run the checks with:
 

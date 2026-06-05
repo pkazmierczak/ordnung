@@ -10,8 +10,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/schollz/progressbar/v3"
-	log "github.com/sirupsen/logrus"
+	"atomicgo.dev/cursor"
+	"github.com/pterm/pterm"
 
 	"github.com/pkazmierczak/ordnung/internal/ordnung"
 )
@@ -24,7 +24,6 @@ var (
 - YYYY/MM/DD
 - YYYY/MM/YYYY-MM-DD
 - YYYY/MM-DD`)
-	loglvl         = flag.String("log-level", "info", "The log level")
 	keepLivePhotos = flag.Bool("keep-live-photos", false,
 		"Keep Apple Live Photo .mov parts? When false (the default), a .mov is deleted if a same-named HEIC or JPG still sits beside it.")
 	includeVideos = flag.Bool("videos", false,
@@ -44,25 +43,44 @@ type liveLink struct {
 	movImg  *ordnung.Image // the video's own rename entry, or nil when videos aren't being renamed
 }
 
+// findImages runs the directory walk behind a brief live spinner, then resolves
+// it into a one-line summary, so scanning a large tree shows activity instead of
+// looking like a hang. The work itself is getImages; this only wraps it in
+// feedback. With no terminal to animate on it prints a single plain line.
+func findImages(dir string) ([]*ordnung.Image, []liveLink, []walkWarning) {
+	if !interactiveStderr() {
+		images, links, warnings := getImages(dir, *keepLivePhotos, *includeVideos)
+		pterm.Info.WithWriter(os.Stderr).Printfln("Found %d file(s) to examine.", len(images))
+		return images, links, warnings
+	}
+	sp, _ := pterm.DefaultSpinner.WithWriter(os.Stderr).Start("Scanning " + dir + " for photos…")
+	images, links, warnings := getImages(dir, *keepLivePhotos, *includeVideos)
+	sp.Success(fmt.Sprintf("Found %d file(s) to examine.", len(images)))
+	return images, links, warnings
+}
+
 // getImages scans a directory (recursively) and prepares the files to process.
 // Stills are collected with any XMP sidecar; when includeVideos is true, videos
 // are collected too (each with its own sidecar). When keepLive is false, each
 // still is coupled with its Live Photo .mov part via a liveLink for later
-// resolution.
+// resolution. Entries the walk can't read are collected as walkWarnings rather
+// than logged inline, so the caller can group them with the other problems.
 //
 // Crucially, a Live Photo .mov is NOT excluded here. Whether it is deleted (its
 // still decoded) or renamed like any other video (its still failed) can only be
 // known after extraction, so the decision is deferred to resolveLivePhotos.
-func getImages(directory string, keepLive, includeVideos bool) ([]*ordnung.Image, []liveLink) {
+func getImages(directory string, keepLive, includeVideos bool) ([]*ordnung.Image, []liveLink, []walkWarning) {
 	var stills []*ordnung.Image
 	var videos []*ordnung.Image
 	var videoInfos []os.FileInfo // parallel to videos, for identity matching
+	var warnings []walkWarning   // unreadable entries, surfaced with the rest
 
 	if err := filepath.WalkDir(directory, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Don't abort the whole walk because one entry was unreadable;
-			// log it and keep going.
-			log.Warnf("skipping %s: %v", path, err)
+			// record it and keep going, so it's grouped into the final report
+			// instead of scrolling past the progress bar.
+			warnings = append(warnings, walkWarning{path: path, err: err})
 			return nil
 		}
 		if d.IsDir() {
@@ -86,7 +104,9 @@ func getImages(directory string, keepLive, includeVideos bool) ([]*ordnung.Image
 		}
 		return nil
 	}); err != nil {
-		log.Fatal(err)
+		// The walk itself failed (e.g. the root became inaccessible mid-scan).
+		// Record it rather than aborting, so anything already found still runs.
+		warnings = append(warnings, walkWarning{path: directory, err: err})
 	}
 
 	var links []liveLink
@@ -104,7 +124,7 @@ func getImages(directory string, keepLive, includeVideos bool) ([]*ordnung.Image
 		}
 	}
 
-	return append(stills, videos...), links
+	return append(stills, videos...), links, warnings
 }
 
 // matchVideo returns the renameable video entry that refers to the same file as
@@ -167,38 +187,33 @@ func parallelDo(images []*ordnung.Image, workers int, fn func(*ordnung.Image)) {
 }
 
 // extractDates reads the capture date of every image. This is the expensive,
-// EXIF-decoding stage, so it runs concurrently. Problems are collected and
-// returned (classified as *ordnung.ExtractError) rather than logged inline, so
-// the progress bar stays readable and the caller can surface a single grouped
-// report once the scan is done.
-func extractDates(images []*ordnung.Image, workers int, showBar bool) []*ordnung.ExtractError {
-	var bar *progressbar.ProgressBar
-	if showBar {
-		bar = progressbar.Default(int64(len(images)), "reading metadata")
-	} else {
-		log.Infof("reading metadata from %d files", len(images))
-	}
+// EXIF-decoding stage, so it runs concurrently. Progress is reported live — a
+// single updating line naming the file currently being read — while problems
+// are collected and returned (classified as *ordnung.ExtractError) rather than
+// printed inline, so the caller can surface a single grouped report once the
+// scan is done.
+func extractDates(images []*ordnung.Image, workers int) []*ordnung.ExtractError {
+	prog := newProgress("Reading metadata", len(images))
+	defer prog.stop()
 
 	var (
 		mu     sync.Mutex
 		issues []*ordnung.ExtractError
 	)
 	parallelDo(images, workers, func(img *ordnung.Image) {
+		prog.item(img.OriginalName)
 		if err := img.ExtractDate(); err != nil {
 			var ee *ordnung.ExtractError
-			if errors.As(err, &ee) {
-				mu.Lock()
-				issues = append(issues, ee)
-				mu.Unlock()
-			} else {
-				// Defensive: ExtractDate classifies every failure, but never
-				// silently drop an unexpected one.
-				log.Warn(err)
+			if !errors.As(err, &ee) {
+				// ExtractDate classifies every failure, but never silently drop
+				// an unexpected one: fold it into the report as unsupported.
+				ee = ordnung.NewExtractError(ordnung.Unsupported, img.OriginalName, err)
 			}
+			mu.Lock()
+			issues = append(issues, ee)
+			mu.Unlock()
 		}
-		if bar != nil {
-			bar.Add(1)
-		}
+		prog.done()
 	})
 	return issues
 }
@@ -231,23 +246,26 @@ func assignNames(images []*ordnung.Image, pattern string) []*ordnung.Image {
 	return toRename
 }
 
-// applyRenames performs the renames concurrently. Every target name is unique
-// and never equals another image's source, so the renames are independent. Any
-// failures are collected and returned (rather than logged inline) so they can be
-// reported together once the progress bar is done.
+// applyRenames performs the renames concurrently, reporting progress live. Every
+// target name is unique and never equals another image's source, so the renames
+// are independent. Failures are collected and returned (rather than printed
+// inline) so they can be reported together once the bar is done.
 func applyRenames(images []*ordnung.Image, workers int) []renameFailure {
-	bar := progressbar.Default(int64(len(images)), "renaming")
+	prog := newProgress("Renaming", len(images))
+	defer prog.stop()
+
 	var (
 		mu       sync.Mutex
 		failures []renameFailure
 	)
 	parallelDo(images, workers, func(img *ordnung.Image) {
+		prog.item(img.OriginalName)
 		if err := img.Rename(); err != nil {
 			mu.Lock()
 			failures = append(failures, renameFailure{path: img.OriginalName, err: err})
 			mu.Unlock()
 		}
-		bar.Add(1)
+		prog.done()
 	})
 	return failures
 }
@@ -296,39 +314,57 @@ Exit status:
 	}
 	flag.Parse()
 
-	// setup logging
-	logLevel, err := log.ParseLevel(*loglvl)
-	if err != nil {
-		logLevel = log.InfoLevel
-		log.Warnf("invalid log-level %s, set to %v", *loglvl, log.InfoLevel)
-	}
-	log.SetLevel(logLevel)
-
 	arg := flag.Args()
 	if len(arg) != 1 {
 		flag.Usage()
 		return 1
 	}
+	dir := arg[0]
 
-	imageFiles, liveLinks := getImages(arg[0], *keepLivePhotos, *includeVideos)
+	// Decide once how to present ourselves. The live UI is drawn on stderr, so
+	// it keys off whether stderr is a terminal — independently of stdout, which
+	// carries the machine-readable dry-run plan.
+	if interactiveStderr() {
+		// The progress bar hides/shows the terminal cursor; point that at stderr
+		// too, so a redirected stdout (e.g. `ordnung dir > plan.txt`) stays clean.
+		cursor.SetTarget(os.Stderr)
+	} else {
+		// No terminal to animate on: drop colors and spinners entirely so piped
+		// output and CI logs stay plain and grep-able.
+		pterm.DisableStyling()
+	}
 
-	// Phase 1: extract capture dates (parallel, the slow part). Problems are
-	// collected rather than logged inline so the progress bar stays readable;
-	// they're surfaced together as a report once the scan finishes. The bar is
-	// shown only when we'll actually rename — not for dry or report-only runs.
-	showBar := !*dryRun && !*reportOnly
-	issues := extractDates(imageFiles, *numWorkers, showBar)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		pterm.Error.WithWriter(os.Stderr).Printfln("cannot scan %q: not a readable directory", dir)
+		return 1
+	}
+
+	imageFiles, liveLinks, warnings := findImages(dir)
+
+	// Phase 1: extract capture dates (parallel, the slow part), reporting live.
+	// Problems are collected rather than printed inline so they can be surfaced
+	// together as a report once the scan finishes.
+	issues := extractDates(imageFiles, *numWorkers)
 	skipped := countSkipped(issues)
+	// Unreadable directory entries from the walk need attention just like
+	// skipped files, so they count toward the exit status too.
+	needsAttention := skipped + len(warnings)
+
+	// Surface the walk's unreadable entries alongside the per-file problems,
+	// rather than letting them scroll past the progress bar.
+	if len(warnings) > 0 {
+		reportWalkWarnings(os.Stderr, warnings)
+	}
 
 	// Report-only: scan, report, and signal via the exit code. No plan, no
 	// renames, no Live Photo bookkeeping.
 	if *reportOnly {
 		if len(issues) > 0 {
 			reportIssues(os.Stderr, issues)
-		} else {
-			fmt.Fprintln(os.Stderr, "No problems found.")
+		} else if len(warnings) == 0 {
+			pterm.Success.WithWriter(os.Stderr).Println("No problems found.")
 		}
-		return exitCode(skipped, 0)
+		return exitCode(needsAttention, 0)
 	}
 
 	// Phase 1b: now that dates are known, decide each Live Photo video's fate
@@ -345,8 +381,8 @@ Exit status:
 	}
 
 	if len(toRename) == 0 {
-		fmt.Fprintln(os.Stderr, "Nothing to rename.")
-		return exitCode(skipped, 0)
+		pterm.Info.WithWriter(os.Stderr).Println("Nothing to rename.")
+		return exitCode(needsAttention, 0)
 	}
 
 	// Phase 3: report the plan (dry run) or apply it (parallel).
@@ -360,7 +396,9 @@ Exit status:
 				fmt.Printf("%s ✗ (live photo video, deleted)\n", img.LiveVideo)
 			}
 		}
-		return exitCode(skipped, 0)
+		pterm.Info.WithWriter(os.Stderr).Printfln(
+			"Dry run: %d file(s) would be renamed. Re-run with -dry=false to apply.", len(toRename))
+		return exitCode(needsAttention, 0)
 	}
 
 	// A real run that turned up problems pauses for confirmation so the user can
@@ -369,7 +407,7 @@ Exit status:
 	// non-interactive use keeps working as before.
 	if len(issues) > 0 && !*assumeYes && stdinIsInteractive() {
 		if !confirmProceed(os.Stdin, os.Stderr, fmt.Sprintf("Proceed with renaming %d file(s)?", len(toRename))) {
-			fmt.Fprintln(os.Stderr, "Aborted; no files were changed.")
+			pterm.Warning.WithWriter(os.Stderr).Println("Aborted; no files were changed.")
 			return 1
 		}
 	}
@@ -377,7 +415,11 @@ Exit status:
 	failures := applyRenames(toRename, *numWorkers)
 	if len(failures) > 0 {
 		reportRenameFailures(os.Stderr, failures)
+		pterm.Warning.WithWriter(os.Stderr).Printfln(
+			"Renamed %d of %d file(s); %d failed.", len(toRename)-len(failures), len(toRename), len(failures))
+	} else {
+		pterm.Success.WithWriter(os.Stderr).Printfln("Renamed %d file(s).", len(toRename))
 	}
 
-	return exitCode(skipped, len(failures))
+	return exitCode(needsAttention, len(failures))
 }
