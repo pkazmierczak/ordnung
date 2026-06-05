@@ -42,8 +42,20 @@ func TestImage_GenerateNewName(t *testing.T) {
 			filepath.Join(dir, fmt.Sprintf("2021/07-15_%s-01.jpg", suffix)),
 		},
 		{
-			"unsupported pattern falls back to YYYY-MM-DD",
+			"custom MM-DD pattern (no year)",
 			"MM-DD",
+			map[string]struct{}{},
+			filepath.Join(dir, fmt.Sprintf("07-15_%s-00.jpg", suffix)),
+		},
+		{
+			"custom pattern with sub-directories",
+			"YYYY/MM",
+			map[string]struct{}{},
+			filepath.Join(dir, fmt.Sprintf("2021/07_%s-00.jpg", suffix)),
+		},
+		{
+			"empty pattern falls back to the default",
+			"",
 			map[string]struct{}{},
 			filepath.Join(dir, fmt.Sprintf("2021-07-15_%s-00.jpg", suffix)),
 		},

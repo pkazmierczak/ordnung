@@ -45,28 +45,14 @@ func timeSuffix(t time.Time) string {
 func (i *Image) GenerateNewName(pattern string, reserved map[string]struct{}) {
 	dir, _ := filepath.Split(i.OriginalName)
 	ext := strings.ToLower(filepath.Ext(i.OriginalName)) // all extensions lowercase for consistency
-	var datePart string
 
-	switch pattern {
-	case "YYYY-MM-DD":
-		datePart = i.Date.Format("2006-01-02")
-	case "YYYY/MM/DD":
-		datePart = i.Date.Format("2006/01/02")
-	case "YYYY/MM-DD":
-		datePart = i.Date.Format("2006/01-02")
-	case "YYYY/YYYY-MM-DD":
-		datePart = fmt.Sprintf("%s/%s", i.Date.Format("2006"), i.Date.Format("2006-01-02"))
-	case "YYYY/MM/YYYY-MM-DD":
-		datePart = fmt.Sprintf("%s/%s/%s", i.Date.Format("2006"), i.Date.Format("01"), i.Date.Format("2006-01-02"))
-	default:
-		datePart = i.Date.Format("2006-01-02")
-	}
-
-	// Patterns express subdirectories with "/"; translate those to the OS path
-	// separator so generated names use native separators (e.g. backslashes on
-	// Windows). Without this, names would mix separators and the separator-
-	// sensitive collision checks below could miss an already-claimed slot.
-	datePart = filepath.FromSlash(datePart)
+	// Expand the configured pattern (its YYYY/MM/DD tokens) against this image's
+	// capture date to form the date-derived part of the name. Patterns express
+	// subdirectories with "/"; translate those to the OS path separator so
+	// generated names use native separators (e.g. backslashes on Windows).
+	// Without this, names would mix separators and the separator-sensitive
+	// collision checks below could miss an already-claimed slot.
+	datePart := filepath.FromSlash(expandPattern(pattern, i.Date))
 
 	// The base name encodes the date (from the pattern) plus a time-derived
 	// suffix that keeps same-day images ordered. base sorts chronologically.

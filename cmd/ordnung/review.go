@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/pterm/pterm"
+	"golang.org/x/term"
 
 	"github.com/pkazmierczak/ordnung/internal/ordnung"
 )
@@ -82,15 +83,14 @@ func confirmProceed(in io.Reader, out io.Writer, prompt string) bool {
 	}
 }
 
-// stdinIsInteractive reports whether stdin is a terminal we can prompt on. When
-// it isn't — a pipe, a file redirect, CI, a cron job — ordnung must not block
-// waiting for input, preserving its non-interactive behavior.
+// stdinIsInteractive reports whether stdin is a real terminal we can prompt on.
+// When it isn't — a pipe, a file redirect, /dev/null, CI, a cron job — ordnung
+// must not block waiting for input, so the confirmation prompt and the
+// first-run wizard are skipped, preserving non-interactive behavior. A genuine
+// TTY check is used so a character device like /dev/null counts as
+// non-interactive.
 func stdinIsInteractive() bool {
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // renameFailure records a file whose Rename failed, so failures can be reported

@@ -102,9 +102,9 @@ func TestGetImages_LivePhotoVideoRenamedWhenStillFails(t *testing.T) {
 	test.True(t, liveVid.Process, test.Sprint("the video is renamed, not orphaned, when its still fails"))
 }
 
-// TestGetImages_KeepLivePhotosRenamesTheVideo verifies that with
-// -keep-live-photos no link is created, so the Live Photo .mov is renamed like
-// any other video and the still never claims it for deletion.
+// TestGetImages_KeepLivePhotosRenamesTheVideo verifies that with the
+// keep-live-photos setting enabled no link is created, so the Live Photo .mov
+// is renamed like any other video and the still never claims it for deletion.
 func TestGetImages_KeepLivePhotosRenamesTheVideo(t *testing.T) {
 	dir := t.TempDir()
 	heic := filepath.Join(dir, "IMG_1234.heic")
@@ -125,9 +125,9 @@ func TestGetImages_KeepLivePhotosRenamesTheVideo(t *testing.T) {
 	test.True(t, video.Process)
 }
 
-// TestGetImages_VideosDisabledStillDeletesLivePhoto confirms that without
-// -videos no video is queued for renaming, while Live Photo deletion still
-// happens via the still.
+// TestGetImages_VideosDisabledStillDeletesLivePhoto confirms that with video
+// renaming disabled no video is queued for renaming, while Live Photo deletion
+// still happens via the still.
 func TestGetImages_VideosDisabledStillDeletesLivePhoto(t *testing.T) {
 	dir := t.TempDir()
 	heic := filepath.Join(dir, "IMG_1234.heic")
@@ -145,5 +145,5 @@ func TestGetImages_VideosDisabledStillDeletesLivePhoto(t *testing.T) {
 
 	still := find(images, heic)
 	must.NotNil(t, still, must.Sprint("the still should be processed"))
-	test.Eq(t, liveMov, still.LiveVideo, test.Sprint("Live Photo deletion still applies without -videos"))
+	test.Eq(t, liveMov, still.LiveVideo, test.Sprint("Live Photo deletion still applies without video renaming"))
 }

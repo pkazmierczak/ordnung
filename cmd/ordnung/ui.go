@@ -6,19 +6,20 @@ import (
 	"sync"
 
 	"github.com/pterm/pterm"
+	"golang.org/x/term"
 )
 
 // interactiveStderr reports whether the UI stream — stderr, where progress and
-// status are drawn — is a terminal. When it isn't (a pipe, a file redirect, CI,
-// a cron job) ordnung prints plain, uncolored status instead of animated
-// progress, so logs stay readable and grep-able and nothing tries to redraw a
-// line that can't be redrawn.
+// status are drawn — is a real terminal. When it isn't (a pipe, a file
+// redirect, /dev/null, CI, a cron job) ordnung prints plain, uncolored status
+// instead of animated progress, so logs stay readable and grep-able and nothing
+// tries to redraw a line that can't be redrawn.
+//
+// A genuine TTY check (not merely "is a character device") is used so that
+// /dev/null — a character device — is correctly treated as non-interactive,
+// which keeps unattended runs from ever stalling on a prompt.
 func interactiveStderr() bool {
-	info, err := os.Stderr.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 // progress is a thin wrapper over a pterm progress bar that reports a parallel

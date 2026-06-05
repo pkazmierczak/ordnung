@@ -17,17 +17,12 @@ import (
 )
 
 var (
-	dryRun     = flag.Bool("dry", true, "Dry run? (only prints a list of pairs: old name -> new name)")
-	numWorkers = flag.Int("workers", 4, "How many concurrent workers to spawn?")
-	pattern    = flag.String("pattern", "YYYY-MM-DD", `Renaming pattern, can be one of the following:
-- YYYY-MM-DD
-- YYYY/MM/DD
-- YYYY/MM/YYYY-MM-DD
-- YYYY/MM-DD`)
-	keepLivePhotos = flag.Bool("keep-live-photos", false,
-		"Keep Apple Live Photo .mov parts? When false (the default), a .mov is deleted if a same-named HEIC or JPG still sits beside it.")
-	includeVideos = flag.Bool("videos", false,
-		"Also rename video files (.mov/.mp4/.m4v) using their embedded creation date.")
+	configPath = flag.String("config", "",
+		"Path to the TOML config file. Defaults to ~/.config/ordnung/config.toml, created by a first-run wizard.")
+	reconfigure = flag.Bool("configure", false,
+		"Run the interactive setup wizard to (re)create the config file, then exit.")
+	dryRun = flag.Bool("dry", true,
+		"Dry run: only print the plan (old name -> new name). Overrides the config's dry_run for this run.")
 	assumeYes = flag.Bool("yes", false,
 		"Skip the confirmation prompt shown after a scan that reported problems, and proceed anyway.")
 	reportOnly = flag.Bool("report-only", false,
@@ -47,14 +42,14 @@ type liveLink struct {
 // it into a one-line summary, so scanning a large tree shows activity instead of
 // looking like a hang. The work itself is getImages; this only wraps it in
 // feedback. With no terminal to animate on it prints a single plain line.
-func findImages(dir string) ([]*ordnung.Image, []liveLink, []walkWarning) {
+func findImages(dir string, keepLive, includeVideos bool) ([]*ordnung.Image, []liveLink, []walkWarning) {
 	if !interactiveStderr() {
-		images, links, warnings := getImages(dir, *keepLivePhotos, *includeVideos)
+		images, links, warnings := getImages(dir, keepLive, includeVideos)
 		pterm.Info.WithWriter(os.Stderr).Printfln("Found %d file(s) to examine.", len(images))
 		return images, links, warnings
 	}
 	sp, _ := pterm.DefaultSpinner.WithWriter(os.Stderr).Start("Scanning " + dir + " for photos…")
-	images, links, warnings := getImages(dir, *keepLivePhotos, *includeVideos)
+	images, links, warnings := getImages(dir, keepLive, includeVideos)
 	sp.Success(fmt.Sprintf("Found %d file(s) to examine.", len(images)))
 	return images, links, warnings
 }
@@ -303,6 +298,12 @@ func run() int {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: ./ordnung [options] directoryToScan
 
+ordnung renames photos (and, optionally, videos) after their capture date.
+Preferences — the renaming pattern, worker count, and video / Live Photo
+handling — live in a TOML config file (default: ~/.config/ordnung/config.toml).
+On first run ordnung offers a wizard to create it; re-run the wizard any time
+with -configure.
+
 Options:
 `)
 		flag.PrintDefaults()
@@ -314,16 +315,15 @@ Exit status:
 	}
 	flag.Parse()
 
-	arg := flag.Args()
-	if len(arg) != 1 {
-		flag.Usage()
-		return 1
-	}
-	dir := arg[0]
+	// Remember which flags were explicitly passed, so a config value is only
+	// overridden when the user actually gave the corresponding flag (see -dry).
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	// Decide once how to present ourselves. The live UI is drawn on stderr, so
 	// it keys off whether stderr is a terminal — independently of stdout, which
-	// carries the machine-readable dry-run plan.
+	// carries the machine-readable dry-run plan. The wizard draws on stderr too,
+	// so this must be set up before any configuration prompt.
 	if interactiveStderr() {
 		// The progress bar hides/shows the terminal cursor; point that at stderr
 		// too, so a redirected stdout (e.g. `ordnung dir > plan.txt`) stays clean.
@@ -334,17 +334,45 @@ Exit status:
 		pterm.DisableStyling()
 	}
 
+	// -configure only (re)creates the config file and exits; it needs no
+	// directory to scan, so handle it before requiring one.
+	if *reconfigure {
+		return runConfigure()
+	}
+
+	arg := flag.Args()
+	if len(arg) != 1 {
+		flag.Usage()
+		return 1
+	}
+	dir := arg[0]
+
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		pterm.Error.WithWriter(os.Stderr).Printfln("cannot scan %q: not a readable directory", dir)
 		return 1
 	}
 
-	imageFiles, liveLinks, warnings := findImages(dir)
+	// Load preferences from the config file, running the first-run wizard or
+	// falling back to built-in defaults as appropriate.
+	cfg, err := resolveConfig()
+	if err != nil {
+		pterm.Error.WithWriter(os.Stderr).Println(err.Error())
+		return 1
+	}
+
+	// The config carries the default for previewing vs. applying; -dry overrides
+	// it for this run, but only when the flag was actually passed.
+	dry := cfg.DryRun
+	if setFlags["dry"] {
+		dry = *dryRun
+	}
+
+	imageFiles, liveLinks, warnings := findImages(dir, cfg.KeepLivePhotos, cfg.Videos)
 
 	// Phase 1: extract capture dates (parallel, the slow part), reporting live.
 	// Problems are collected rather than printed inline so they can be surfaced
 	// together as a report once the scan finishes.
-	issues := extractDates(imageFiles, *numWorkers)
+	issues := extractDates(imageFiles, cfg.Workers)
 	skipped := countSkipped(issues)
 	// Unreadable directory entries from the walk need attention just like
 	// skipped files, so they count toward the exit status too.
@@ -372,7 +400,7 @@ Exit status:
 	resolveLivePhotos(liveLinks)
 
 	// Phase 2: assign target names deterministically (single-threaded).
-	toRename := assignNames(imageFiles, *pattern)
+	toRename := assignNames(imageFiles, cfg.Pattern)
 
 	// Surface everything the scan flagged as one grouped report, instead of a
 	// stream of warnings interleaved with the progress bar.
@@ -386,7 +414,7 @@ Exit status:
 	}
 
 	// Phase 3: report the plan (dry run) or apply it (parallel).
-	if *dryRun {
+	if dry {
 		for _, img := range toRename {
 			fmt.Printf("%s ⇨ %s\n", img.OriginalName, img.NewName)
 			if img.Sidecar != "" {
@@ -412,7 +440,7 @@ Exit status:
 		}
 	}
 
-	failures := applyRenames(toRename, *numWorkers)
+	failures := applyRenames(toRename, cfg.Workers)
 	if len(failures) > 0 {
 		reportRenameFailures(os.Stderr, failures)
 		pterm.Warning.WithWriter(os.Stderr).Printfln(
