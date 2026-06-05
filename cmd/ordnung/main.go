@@ -31,6 +31,8 @@ var (
 		"Also rename video files (.mov/.mp4/.m4v) using their embedded creation date.")
 	assumeYes = flag.Bool("yes", false,
 		"Skip the confirmation prompt shown after a scan that reported problems, and proceed anyway.")
+	reportOnly = flag.Bool("report-only", false,
+		"Scan and print the problem report, then exit without printing a plan or renaming anything (handy with the exit code for auditing a directory in scripts).")
 )
 
 // liveLink couples a still with its Apple Live Photo video part. The coupling
@@ -230,18 +232,68 @@ func assignNames(images []*ordnung.Image, pattern string) []*ordnung.Image {
 }
 
 // applyRenames performs the renames concurrently. Every target name is unique
-// and never equals another image's source, so the renames are independent.
-func applyRenames(images []*ordnung.Image, workers int) {
+// and never equals another image's source, so the renames are independent. Any
+// failures are collected and returned (rather than logged inline) so they can be
+// reported together once the progress bar is done.
+func applyRenames(images []*ordnung.Image, workers int) []renameFailure {
 	bar := progressbar.Default(int64(len(images)), "renaming")
+	var (
+		mu       sync.Mutex
+		failures []renameFailure
+	)
 	parallelDo(images, workers, func(img *ordnung.Image) {
 		if err := img.Rename(); err != nil {
-			log.Errorln(err)
+			mu.Lock()
+			failures = append(failures, renameFailure{path: img.OriginalName, err: err})
+			mu.Unlock()
 		}
 		bar.Add(1)
 	})
+	return failures
+}
+
+// countSkipped returns how many issues left their file unprocessed (i.e. not the
+// non-fatal missing-metadata fallback, which is still renamed).
+func countSkipped(issues []*ordnung.ExtractError) int {
+	n := 0
+	for _, e := range issues {
+		if e.Kind.Skipped() {
+			n++
+		}
+	}
+	return n
+}
+
+// exitCode maps the outcome of a run to a process status: non-zero when some
+// files were skipped during the scan or some renames failed, so scripts can
+// detect that a directory needs attention.
+func exitCode(skipped, renameFailures int) int {
+	if skipped > 0 || renameFailures > 0 {
+		return 1
+	}
+	return 0
 }
 
 func main() {
+	os.Exit(run())
+}
+
+// run is the program body, returning the process exit status. It is split out
+// from main so the exit code flows from one place (and main stays a one-liner).
+func run() int {
+	// Set Usage before Parse so -h shows the full help, including the exit status.
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: ./ordnung [options] directoryToScan
+
+Options:
+`)
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+Exit status:
+  0  success; every file was handled
+  1  some files were skipped, or some renames failed
+`)
+	}
 	flag.Parse()
 
 	// setup logging
@@ -252,27 +304,32 @@ func main() {
 	}
 	log.SetLevel(logLevel)
 
-	// custom "help" message
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `Usage: ./ordnung [options] directoryToScan
-
-Options:
-`)
-		flag.PrintDefaults()
-	}
-
 	arg := flag.Args()
 	if len(arg) != 1 {
 		flag.Usage()
-		os.Exit(1)
+		return 1
 	}
 
 	imageFiles, liveLinks := getImages(arg[0], *keepLivePhotos, *includeVideos)
 
 	// Phase 1: extract capture dates (parallel, the slow part). Problems are
 	// collected rather than logged inline so the progress bar stays readable;
-	// they're surfaced together as a report once the scan finishes.
-	issues := extractDates(imageFiles, *numWorkers, !*dryRun)
+	// they're surfaced together as a report once the scan finishes. The bar is
+	// shown only when we'll actually rename — not for dry or report-only runs.
+	showBar := !*dryRun && !*reportOnly
+	issues := extractDates(imageFiles, *numWorkers, showBar)
+	skipped := countSkipped(issues)
+
+	// Report-only: scan, report, and signal via the exit code. No plan, no
+	// renames, no Live Photo bookkeeping.
+	if *reportOnly {
+		if len(issues) > 0 {
+			reportIssues(os.Stderr, issues)
+		} else {
+			fmt.Fprintln(os.Stderr, "No problems found.")
+		}
+		return exitCode(skipped, 0)
+	}
 
 	// Phase 1b: now that dates are known, decide each Live Photo video's fate
 	// (delete with its still, or rename it if the still couldn't be processed).
@@ -289,7 +346,7 @@ Options:
 
 	if len(toRename) == 0 {
 		fmt.Fprintln(os.Stderr, "Nothing to rename.")
-		return
+		return exitCode(skipped, 0)
 	}
 
 	// Phase 3: report the plan (dry run) or apply it (parallel).
@@ -303,7 +360,7 @@ Options:
 				fmt.Printf("%s ✗ (live photo video, deleted)\n", img.LiveVideo)
 			}
 		}
-		return
+		return exitCode(skipped, 0)
 	}
 
 	// A real run that turned up problems pauses for confirmation so the user can
@@ -313,9 +370,14 @@ Options:
 	if len(issues) > 0 && !*assumeYes && stdinIsInteractive() {
 		if !confirmProceed(os.Stdin, os.Stderr, fmt.Sprintf("Proceed with renaming %d file(s)?", len(toRename))) {
 			fmt.Fprintln(os.Stderr, "Aborted; no files were changed.")
-			return
+			return 1
 		}
 	}
 
-	applyRenames(toRename, *numWorkers)
+	failures := applyRenames(toRename, *numWorkers)
+	if len(failures) > 0 {
+		reportRenameFailures(os.Stderr, failures)
+	}
+
+	return exitCode(skipped, len(failures))
 }

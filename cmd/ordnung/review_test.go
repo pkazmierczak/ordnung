@@ -77,3 +77,46 @@ func TestConfirmProceed(t *testing.T) {
 			test.Sprint("the prompt should be written to the output"))
 	}
 }
+
+// reportRenameFailures lists every failed rename, sorted by source path.
+func TestReportRenameFailures(t *testing.T) {
+	failures := []renameFailure{
+		{path: "/photos/b.jpg", err: errors.New("permission denied")},
+		{path: "/photos/a.jpg", err: errors.New("refusing to overwrite existing file: /photos/x.jpg")},
+	}
+	var buf bytes.Buffer
+	reportRenameFailures(&buf, failures)
+	out := buf.String()
+
+	test.True(t, strings.Contains(out, "Renaming finished with 2 error(s):"),
+		test.Sprintf("missing header:\n%s", out))
+	test.True(t, strings.Contains(out, "/photos/a.jpg: refusing to overwrite existing file: /photos/x.jpg"),
+		test.Sprintf("missing entry:\n%s", out))
+	test.True(t, strings.Contains(out, "/photos/b.jpg: permission denied"),
+		test.Sprintf("missing entry:\n%s", out))
+
+	aAt := strings.Index(out, "/photos/a.jpg")
+	bAt := strings.Index(out, "/photos/b.jpg")
+	test.True(t, aAt >= 0 && bAt > aAt, test.Sprint("failures should be sorted by source path"))
+}
+
+// countSkipped counts only the fatal kinds; the missing-metadata fallback is
+// processed, not skipped.
+func TestCountSkipped(t *testing.T) {
+	issues := []*ordnung.ExtractError{
+		ordnung.NewExtractError(ordnung.MissingMetadata, "/a", nil),
+		ordnung.NewExtractError(ordnung.Unreadable, "/b", nil),
+		ordnung.NewExtractError(ordnung.Unsupported, "/c", nil),
+		ordnung.NewExtractError(ordnung.TimedOut, "/d", nil),
+	}
+	test.EqOp(t, 3, countSkipped(issues))
+	test.EqOp(t, 0, countSkipped(nil))
+}
+
+// exitCode is non-zero exactly when something needs attention.
+func TestExitCode(t *testing.T) {
+	test.EqOp(t, 0, exitCode(0, 0))
+	test.EqOp(t, 1, exitCode(1, 0))
+	test.EqOp(t, 1, exitCode(0, 1))
+	test.EqOp(t, 1, exitCode(2, 3))
+}

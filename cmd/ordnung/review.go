@@ -79,3 +79,20 @@ func stdinIsInteractive() bool {
 	}
 	return info.Mode()&os.ModeCharDevice != 0
 }
+
+// renameFailure records a file whose Rename failed, so failures can be reported
+// together after the rename pass instead of scrolling past the progress bar.
+type renameFailure struct {
+	path string
+	err  error
+}
+
+// reportRenameFailures prints the files that could not be renamed to w, sorted
+// by source path for stable output.
+func reportRenameFailures(w io.Writer, failures []renameFailure) {
+	sort.Slice(failures, func(a, b int) bool { return failures[a].path < failures[b].path })
+	fmt.Fprintf(w, "\nRenaming finished with %d error(s):\n", len(failures))
+	for _, f := range failures {
+		fmt.Fprintf(w, "  %s: %v\n", f.path, f.err)
+	}
+}

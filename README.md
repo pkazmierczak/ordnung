@@ -27,6 +27,13 @@ confirmation so you can review that report first. The prompt is skipped when
 standard input isn't a terminal (so scripts and CI keep working), or when you
 pass `-yes` to proceed without asking.
 
+Pass `-report-only` to scan and print that report without printing a plan or
+renaming anything — handy for auditing a directory. Either way, `ordnung` exits
+non-zero whenever some files were skipped or a rename failed, so scripts can
+detect that a directory needs attention. Rename failures are themselves
+collected and printed together once the rename pass finishes, rather than
+scrolling past the progress bar.
+
 Reading a file's metadata is bounded by a per-file timeout (10s), so a single
 unreadable file or an unresponsive filesystem can't hang the whole run.
 
